@@ -1,0 +1,6 @@
+streams:
+  dvr_cam1: exec:/config/legacybridge --host 192.168.1.10 --user Admin --pass PASSWORD --channel 1
+  dvr_cam2: exec:/config/legacybridge --host 192.168.1.10 --user Admin --pass PASSWORD --channel 2
+  dvr_cam3: exec:/config/legacybridge --host 192.168.1.10 --user Admin --pass PASSWORD --channel 3
+  dvr_cam4: exec:/config/legacybridge --host 192.168.1.10 --user Admin --pass PASSWORD --channel 4
+  dvr_cam5: exec:/config/legacybridge --host 192.168.1.10 --user Admin --pass PASSWORD --channel 5

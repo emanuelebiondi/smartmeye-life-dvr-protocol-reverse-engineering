@@ -1,0 +1,62 @@
+streams:
+  # Stream default (usa DVR_STREAM dal .env: 0 main, 1 sub)
+  dvr_cam1:
+    - exec:/usr/local/bin/run_legacybridge 1#preload
+  dvr_cam2:
+    - exec:/usr/local/bin/run_legacybridge 2#preload
+  dvr_cam3:
+    - exec:/usr/local/bin/run_legacybridge 3#preload
+  dvr_cam4:
+    - exec:/usr/local/bin/run_legacybridge 4#preload
+  dvr_cam5:
+    - exec:/usr/local/bin/run_legacybridge 5#preload
+
+  # Profili espliciti qualita/latenza per canale
+  dvr_cam1_main:
+    - exec:/usr/local/bin/run_legacybridge 1 0#preload
+  dvr_cam1_sub:
+    - exec:/usr/local/bin/run_legacybridge 1 1#preload
+  dvr_cam1_auto:
+    - exec:/usr/local/bin/run_legacybridge 1 1#preload
+    - exec:/usr/local/bin/run_legacybridge 1 0#preload
+
+  dvr_cam2_main:
+    - exec:/usr/local/bin/run_legacybridge 2 0#preload
+  dvr_cam2_sub:
+    - exec:/usr/local/bin/run_legacybridge 2 1#preload
+  dvr_cam2_auto:
+    - exec:/usr/local/bin/run_legacybridge 2 1#preload
+    - exec:/usr/local/bin/run_legacybridge 2 0#preload
+
+  dvr_cam3_main:
+    - exec:/usr/local/bin/run_legacybridge 3 0#preload
+  dvr_cam3_sub:
+    - exec:/usr/local/bin/run_legacybridge 3 1#preload
+  dvr_cam3_auto:
+    - exec:/usr/local/bin/run_legacybridge 3 1#preload
+    - exec:/usr/local/bin/run_legacybridge 3 0#preload
+
+  dvr_cam4_main:
+    - exec:/usr/local/bin/run_legacybridge 4 0#preload
+  dvr_cam4_sub:
+    - exec:/usr/local/bin/run_legacybridge 4 1#preload
+  dvr_cam4_auto:
+    - exec:/usr/local/bin/run_legacybridge 4 1#preload
+    - exec:/usr/local/bin/run_legacybridge 4 0#preload
+
+  dvr_cam5_main:
+    - exec:/usr/local/bin/run_legacybridge 5 0#preload
+  dvr_cam5_sub:
+    - exec:/usr/local/bin/run_legacybridge 5 1#preload
+  dvr_cam5_auto:
+    - exec:/usr/local/bin/run_legacybridge 5 1#preload
+    - exec:/usr/local/bin/run_legacybridge 5 0#preload
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"

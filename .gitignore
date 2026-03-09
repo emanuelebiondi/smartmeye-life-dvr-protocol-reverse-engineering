@@ -1,0 +1,43 @@
+# Secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Captures and binary dumps
+captures/
+artifacts/
+*.pcap
+*.pcapng
+*.pcapng.gz
+*.cap
+*.dump
+*.bin
+*.raw
+
+# Generated media
+*.h264
+*.264
+*.mp4
+*.avi
+*.mkv
+
+# Logs and diagnostics
+*.log
+diag_*.log
+*_dump.txt
+
+# Go/Python build artifacts
+legacybridge/legacybridge
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.cursor/
+.vscode/
+.idea/
