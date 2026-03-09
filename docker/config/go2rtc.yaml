@@ -1,5 +1,5 @@
 streams:
-  # Stream default (usa DVR_STREAM dal .env: 0 main, 1 sub)
+  # Default stream (uses DVR_STREAM from .env: 0 main, 1 sub)
   dvr_cam1:
     - exec:/usr/local/bin/run_legacybridge 1#preload
   dvr_cam2:
@@ -11,7 +11,7 @@ streams:
   dvr_cam5:
     - exec:/usr/local/bin/run_legacybridge 5#preload
 
-  # Profili espliciti qualita/latenza per canale
+  # Explicit quality/latency profiles per channel
   dvr_cam1_main:
     - exec:/usr/local/bin/run_legacybridge 1 0#preload
   dvr_cam1_sub:

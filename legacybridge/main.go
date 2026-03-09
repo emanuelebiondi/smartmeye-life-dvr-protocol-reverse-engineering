@@ -48,8 +48,8 @@ const (
 	loginSession    = 0xffffffff
 	keepAliveCmd    = 0x0000
 	keepAliveSeq    = 801
-	mediaAckSession = 0x64 // session usata negli ACK client->server nel dump (0x64=100)
-	mediaAckFlag    = 0x02 // flag negli ACK (dump: client->server seq=2 flag=0x00000002)
+	mediaAckSession = 0x64 // session used for client->server ACKs in captures (0x64=100)
+	mediaAckFlag    = 0x02 // ACK flag (captures: client->server seq=2 flag=0x00000002)
 )
 
 type config struct {
@@ -66,12 +66,12 @@ type config struct {
 	reconnect        time.Duration
 	dumpFile         string
 	includeSeq2      bool
-	mediaOffset      int  // byte dopo cui inizia H.264 nel payload (default 12; prova 8 o 16 se video grigio)
-	continuation0    bool // se true, i pacchetti di continuazione senza prefisso 12 byte
-	continuationSkip int  // byte da saltare all'inizio continuazione (0, 4, 8)
-	firstPacketTrim  int  // byte da togliere alla fine del primo pacchetto (0 o 4)
-	all12            bool // come Python: ogni pacchetto ha prefisso 12 byte, sync al primo startcode (qualsiasi NAL)
-	strictFrameType  bool // state-machine stile DLL: frame_type validi {0,1,2,800}
+	mediaOffset      int  // byte offset where H.264 starts in payload (default 12; try 8 or 16 if video is gray)
+	continuation0    bool // if true, continuation packets are treated without the 12-byte prefix
+	continuationSkip int  // bytes to skip at continuation start (0, 4, 8)
+	firstPacketTrim  int  // bytes trimmed from end of first packet (0 or 4)
+	all12            bool // Python-style: every packet has 12-byte prefix, sync on first start code (any NAL)
+	strictFrameType  bool // DLL-style state machine: valid frame_type values {0,1,2,800}
 	diagFile         string
 	verbose          bool
 }
@@ -95,8 +95,8 @@ type client struct {
 	diagMu              sync.Mutex
 	diagWriter          *bufio.Writer
 	diagFile            *os.File
-	syncedPayloadOffset int  // offset usato al sync; per le continuazioni usiamo lo stesso (evita mix 8/12 byte).
-	lastWasIDRStart     bool // true = ultimo pacchetto scritto era seq=0 (IDR start), continuazioni seq=2 vanno scritte
+	syncedPayloadOffset int  // offset chosen at sync; reuse for continuations (avoids 8/12-byte mixing).
+	lastWasIDRStart     bool // true = last written packet was seq=0 (IDR start), so seq=2 continuations are written
 	haveOpenFrame       bool
 }
 
@@ -128,28 +128,28 @@ func main() {
 
 func parseFlags() config {
 	cfg := config{}
-	flag.StringVar(&cfg.host, "host", "192.168.1.10", "IP del DVR")
-	flag.IntVar(&cfg.cmdPort, "cmd-port", 6001, "Porta comandi")
-	flag.IntVar(&cfg.dataPort, "data-port", 6002, "Porta media")
+	flag.StringVar(&cfg.host, "host", "192.168.1.10", "DVR IP")
+	flag.IntVar(&cfg.cmdPort, "cmd-port", 6001, "Command port")
+	flag.IntVar(&cfg.dataPort, "data-port", 6002, "Media port")
 	flag.StringVar(&cfg.username, "user", "Admin", "Username DVR")
 	flag.StringVar(&cfg.password, "pass", "", "Password DVR")
-	flag.IntVar(&cfg.channel, "channel", 1, "Canale lato utente")
-	flag.IntVar(&cfg.channelBase, "channel-base", 0, "Base dei canali utente (0 => canali 1..N mappati a 1..N)")
-	flag.IntVar(&cfg.protocolChannel, "protocol-channel", -1, "Indice canale lato protocollo; se -1 viene derivato da channel/channel-base")
-	flag.IntVar(&cfg.stream, "stream", 0, "Indice stream")
-	flag.DurationVar(&cfg.keepAlive, "keepalive", time.Second, "Periodo keepalive")
-	flag.DurationVar(&cfg.reconnect, "reconnect", 3*time.Second, "Attesa prima di riconnettere")
-	flag.StringVar(&cfg.dumpFile, "dump", "", "Legge un dump raw della 6002 e scrive H264 su stdout")
-	flag.BoolVar(&cfg.includeSeq2, "include-seq2", false, "Include anche frame seq=2/3 dal flusso media")
-	flag.IntVar(&cfg.mediaOffset, "media-offset", 12, "Offset byte payload media prima dell'H.264 (12 default; prova 8 o 16 se video grigio)")
-	// Dai dump: seq=1 e seq=2 con payload hanno sempre prefisso 12 byte (a7724a69...); continuazione = payload[12:].
-	flag.BoolVar(&cfg.continuation0, "continuation-no-prefix", false, "Se true, continuazione senza prefisso (payload[0:]); default false = sempre 12 byte come dump")
-	flag.IntVar(&cfg.continuationSkip, "continuation-skip", 0, "Byte da saltare all'inizio continuazione (default 0, prefisso già gestito)")
-	flag.IntVar(&cfg.firstPacketTrim, "first-packet-trim", 0, "Byte da togliere alla fine del primo pacchetto (prova 4 se MB corrotti)")
-	flag.BoolVar(&cfg.all12, "all-12", true, "Prefisso 12 byte su ogni pacchetto, sync al primo startcode (default; come main.py)")
-	flag.BoolVar(&cfg.strictFrameType, "strict-frame-type", true, "Applica parsing media stile DLL (frame_type 0/1/2/800)")
-	flag.StringVar(&cfg.diagFile, "diag-file", "", "Scrive diagnostica media CSV-like (cmd,frame_type,seqid,len,meta,action)")
-	flag.BoolVar(&cfg.verbose, "verbose", false, "Abilita log verbosi su stderr")
+	flag.IntVar(&cfg.channel, "channel", 1, "User-side channel")
+	flag.IntVar(&cfg.channelBase, "channel-base", 0, "User channel base (0 => channels 1..N map to 1..N)")
+	flag.IntVar(&cfg.protocolChannel, "protocol-channel", -1, "Protocol-side channel index; if -1 it is derived from channel/channel-base")
+	flag.IntVar(&cfg.stream, "stream", 0, "Stream index")
+	flag.DurationVar(&cfg.keepAlive, "keepalive", time.Second, "Keepalive period")
+	flag.DurationVar(&cfg.reconnect, "reconnect", 3*time.Second, "Delay before reconnect")
+	flag.StringVar(&cfg.dumpFile, "dump", "", "Read a raw 6002 dump and write H264 to stdout")
+	flag.BoolVar(&cfg.includeSeq2, "include-seq2", false, "Include seq=2/3 frames from media stream")
+	flag.IntVar(&cfg.mediaOffset, "media-offset", 12, "Media payload byte offset before H.264 (default 12; try 8 or 16 if video is gray)")
+	// In captures, seq=1 and seq=2 packets with payload always include a 12-byte prefix (a7724a69...); continuation = payload[12:].
+	flag.BoolVar(&cfg.continuation0, "continuation-no-prefix", false, "If true, continuation without prefix (payload[0:]); default false = always 12-byte prefix from captures")
+	flag.IntVar(&cfg.continuationSkip, "continuation-skip", 0, "Bytes to skip at continuation start (default 0, prefix already handled)")
+	flag.IntVar(&cfg.firstPacketTrim, "first-packet-trim", 0, "Bytes to trim from first packet end (try 4 if macroblocks are corrupted)")
+	flag.BoolVar(&cfg.all12, "all-12", true, "12-byte prefix on every packet, sync on first start code (default; like main.py)")
+	flag.BoolVar(&cfg.strictFrameType, "strict-frame-type", true, "Apply DLL-style media parsing (frame_type 0/1/2/800)")
+	flag.StringVar(&cfg.diagFile, "diag-file", "", "Write CSV-like media diagnostics (cmd,frame_type,seqid,len,meta,action)")
+	flag.BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logs on stderr")
 	flag.Parse()
 	return cfg
 }
@@ -164,7 +164,7 @@ func (c *client) run(ctx context.Context, out io.Writer) error {
 			return nil
 		}
 		if c.cfg.verbose {
-			c.logger.Printf("stream terminato: %v", err)
+			c.logger.Printf("stream ended: %v", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -177,7 +177,7 @@ func (c *client) run(ctx context.Context, out io.Writer) error {
 func (c *client) runOnce(ctx context.Context, out io.Writer) error {
 	protoCh := c.protocolChannel()
 	if protoCh < 0 || protoCh > 7 {
-		return fmt.Errorf("protocol-channel fuori range: %d", protoCh)
+		return fmt.Errorf("protocol-channel out of range: %d", protoCh)
 	}
 	if err := c.openDiag(); err != nil {
 		return err
@@ -206,7 +206,7 @@ func (c *client) runOnce(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	// Come Python e dump: stream_ch_request PRIMA di leggere socket_id dalla media, altrimenti il DVR non invia il flusso.
+	// As seen in Python/captures: send stream_ch_request BEFORE reading media socket_id, otherwise DVR does not start streaming.
 	if err := c.sendStreamChRequest(protoCh); err != nil {
 		return err
 	}
@@ -408,7 +408,7 @@ func (c *client) bootstrap() error {
 	return nil
 }
 
-// sendStreamChRequest invia stream_ch_request (come Python/dump) prima di leggere socket_id dalla media.
+// sendStreamChRequest sends stream_ch_request (as in Python/captures) before reading media socket_id.
 func (c *client) sendStreamChRequest(protoCh int) error {
 	base := uint32(0x5703 + protoCh*3)
 	// #region agent log
@@ -452,7 +452,7 @@ func (c *client) readSocketID() (uint32, error) {
 			// #region agent log
 			dbgLog("H2", "readSocketID", "socket_id received", map[string]interface{}{"socketID": socketID})
 			// #endregion
-			// Ack iniziale come da dump (client->server seq=800, payload socket_id)
+			// Initial ACK as in captures (client->server seq=800, payload socket_id)
 			ack := buildFrame(0, 800, 0, 0, 0, f.payload)
 			if err := c.writeData(ack); err != nil {
 				return 0, fmt.Errorf("media ack socket_id: %w", err)
@@ -465,7 +465,7 @@ func (c *client) readSocketID() (uint32, error) {
 func (c *client) openChannel(protoCh int, socketID uint32) error {
 	extra := uint32(1 << protoCh)
 	base := uint32(0x5703 + protoCh*3)
-	// stream_ch già inviato in sendStreamChRequest; qui solo open_channel e open_audio
+	// stream_ch already sent in sendStreamChRequest; only open_channel and open_audio here
 
 	openXML := fmt.Sprintf(`<?xml version="1.0" ?>
 <Message Version="1">
@@ -605,10 +605,10 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 			i += j + 1
 			continue
 		}
-		// Porta 6002 (media) usa header esteso da 44 byte:
-		// - primi 32 byte come frame standard
-		// - +12 byte meta
-		// - lunghezza payload a offset 40
+		// Port 6002 (media) uses an extended 44-byte header:
+		// - first 32 bytes are standard frame header
+		// - plus 12 metadata bytes
+		// - payload length at offset 40
 		payloadLen := int(be32le(pending[i+40 : i+44]))
 		if payloadLen < 0 || payloadLen > 8*1024*1024 {
 			i++
@@ -620,7 +620,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		}
 		frameBytes := pending[i : i+frameLen]
 		cmd := be32le(frameBytes[4:8])
-		frameType := be32le(frameBytes[8:12]) // nei DLL e' frame_type (0/1/2), non sequence globale
+		frameType := be32le(frameBytes[8:12]) // in DLLs this is frame_type (0/1/2), not a global sequence counter
 		flag := be32le(frameBytes[12:16])
 		session := be32le(frameBytes[16:20])
 		seqID := be32le(frameBytes[20:24])
@@ -646,7 +646,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		}
 		// #endregion
 
-		// Ack ogni pacchetto media (seq=2, flag=2) come nel dump client->server.
+		// ACK each media packet (seq=2, flag=2) as observed in client->server captures.
 		_ = c.writeData(buildFrame(cmd, 2, mediaAckFlag, mediaAckSession, 0, nil))
 		c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "recv")
 
@@ -664,7 +664,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 			continue
 		}
 
-		// Pacchetti vuoti = keepalive/heartbeat DVR.
+		// Empty packets = DVR keepalive/heartbeat.
 		if payloadLen == 0 {
 			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "keepalive_or_empty")
 			i += frameLen
@@ -672,7 +672,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		}
 		switch state {
 		case stateSearchingConfig:
-			// Nel decoder DLL la sync iniziale avviene su frame_type=0 (I-frame/config start)
+			// In DLL decoder logic, initial sync happens on frame_type=0 (I-frame/config start).
 			if frameType != 0 {
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync_type0")
 				i += frameLen
@@ -705,7 +705,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		case stateStreaming:
 			switch frameType {
 			case 0, 1:
-				// Nuovo frame: il payload inizia con prefisso 12 byte e poi Annex-B.
+				// New frame: payload starts with a 12-byte prefix and then Annex-B.
 				start := startcodeOffset(payload)
 				if start < 0 || start >= len(payload) {
 					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_start_no_startcode")
@@ -725,7 +725,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 				c.lastWasIDRStart = frameType == 0
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start")
 			case 2:
-				// Nei dump NEW type=2 e' un blocco meta (tipicamente 164 byte), non H264 Annex-B.
+				// In NEW captures, type=2 is a metadata block (typically 164 bytes), not H264 Annex-B.
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_type2")
 			case 800:
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_socket_id")
@@ -755,7 +755,7 @@ func (c *client) writeCmd(buf []byte) error {
 	return err
 }
 
-// writeData invia un frame sulla connessione media (es. ACK seq=2). Necessario per tenere il DVR in sync.
+// writeData sends a frame on media connection (e.g. ACK seq=2). Required to keep DVR synchronized.
 func (c *client) writeData(buf []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -874,15 +874,15 @@ func extractDump(path string, out io.Writer) error {
 	return err
 }
 
-// extractDumpMedia44 estrae H264 da dump media in formato legacy NEW:
-// header 44 byte (32 standard + 12 meta) e payload_len a offset 40.
+// extractDumpMedia44 extracts H264 from NEW legacy media dump format:
+// 44-byte header (32 standard + 12 metadata) and payload_len at offset 40.
 func extractDumpMedia44(src []byte, out io.Writer) (int, error) {
 	i := 0
 	written := 0
 	synced := false
 	streamCmd := uint32(0xffffffff)
 
-	// Primo frame media puo' essere socket_id con header standard 32 byte.
+	// First media frame may be socket_id with standard 32-byte header.
 	if len(src) >= headerLen && bytes.Equal(src[:4], magic) {
 		firstLen := int(be32le(src[28:32]))
 		firstType := be32le(src[8:12])
@@ -965,7 +965,7 @@ func extractDumpLegacy32(src []byte, out io.Writer) error {
 		}
 		var buf []byte
 		if seq <= 1 {
-			// Primo frame di un NAL: strip prefisso 12 byte e cerca startcode Annex-B
+			// First NAL packet: strip 12-byte prefix and search Annex-B start code
 			if len(payload) > mediaPrefixLen {
 				buf = payload[mediaPrefixLen:]
 			}
@@ -983,7 +983,7 @@ func extractDumpLegacy32(src []byte, out io.Writer) error {
 				}
 			}
 		} else {
-			// Continuazione (seq=2 con dati): dai dump ha sempre prefisso 12 byte come seq=1
+			// Continuation (seq=2 with payload): captures show same 12-byte prefix as seq=1
 			if len(payload) > mediaPrefixLen {
 				buf = payload[mediaPrefixLen:]
 			}
@@ -1026,7 +1026,7 @@ func annexBStart(buf []byte) int {
 	return -1
 }
 
-// hasAnnexBStart indica se buf inizia con startcode Annex-B (4 o 3 byte) e ne restituisce la lunghezza.
+// hasAnnexBStart reports whether buf starts with an Annex-B start code (4 or 3 bytes) and returns its length.
 func hasAnnexBStart(buf []byte) (bool, int) {
 	if len(buf) >= 4 && buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 1 {
 		return true, 4
@@ -1037,8 +1037,8 @@ func hasAnnexBStart(buf []byte) (bool, int) {
 	return false, 0
 }
 
-// startcodeOffset cerca il primo startcode Annex-B seguito da un byte NAL valido (tipo 0-23).
-// Restituisce l'indice dello startcode nel payload o -1.
+// startcodeOffset searches first Annex-B start code followed by a valid NAL byte (type 0-23).
+// Returns start code index in payload, or -1.
 func startcodeOffset(payload []byte) int {
 	for i := 0; i < len(payload); i++ {
 		if i+5 <= len(payload) && payload[i] == 0 && payload[i+1] == 0 && payload[i+2] == 0 && payload[i+3] == 1 {
@@ -1059,7 +1059,7 @@ func startcodeOffset(payload []byte) int {
 
 var annexBStartCode = []byte{0x00, 0x00, 0x00, 0x01}
 
-// firstNALType restituisce il tipo (0-23) del primo NAL in dati Annex-B, o -1.
+// firstNALType returns first NAL type (0-23) in Annex-B data, or -1.
 func firstNALType(annexB []byte) int {
 	if len(annexB) < 4 {
 		return -1
@@ -1078,14 +1078,14 @@ func firstNALType(annexB []byte) int {
 	return int(annexB[off] & 0x1F)
 }
 
-// isKeyframeOrConfig: true se il primo NAL è SPS(7), PPS(8) o IDR(5). Serve per non iniziare con P-frame.
+// isKeyframeOrConfig: true when first NAL is SPS(7), PPS(8), or IDR(5). Used to avoid starting from a P-frame.
 func isKeyframeOrConfig(annexB []byte) bool {
 	t := firstNALType(annexB)
 	return t == 5 || t == 7 || t == 8
 }
 
-// avccToAnnexB converte payload in formato AVCC ([4-byte length][NAL]...) in Annex-B.
-// be = true: length big-endian (MP4); be = false: little-endian.
+// avccToAnnexB converts AVCC payload ([4-byte length][NAL]...) to Annex-B.
+// be = true: big-endian length (MP4); be = false: little-endian.
 func avccToAnnexBWithEndian(payload []byte, offset int, be bool) []byte {
 	if offset+4 > len(payload) {
 		return nil

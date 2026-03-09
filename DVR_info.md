@@ -1,31 +1,20 @@
-# Codifica canali (MAIN STREAM):
-    - Risoluzione: D1
-    - Frame rate: 25
-    - Tipo bit rate: CBR
-    - Qualità immagine: massima
-    - Bit Rate: 2560 Kb
-    - I Frame (s): 1
+# Channel Encoding (Main Stream)
 
-# Codifica canali (SUB STREAM):
-    - Risoluzione: CIF
-    - Frame rate: 5
-    - Tipo bit rate: CBR
-    - Qualità immagine: massima
-    - Bit Rate: 128 Kb
-    - I Frame (s): 1
+- Resolution: D1
+- Frame rate: 25 fps
+- Stream value: 2560 kbps
+- Image quality: maximum
+- Stream type: video stream
 
+# Channel Encoding (Sub Stream)
 
-# Sistema:
-    - Versione: 5.1.4.1
-    - Info chip: 374_W1
-    - ID dispositivo: 1
+- Resolution: CIF
+- Frame rate: 5 fps
+- Stream value: 128 kbps
+- Image quality: maximum
 
-# Canali usati:
-    - ch1: /
-    - ch2: SALA
-    - ch3: GIAR.ANT.1
-    - ch4: GIAR.POST.1
-    - ch5: GIAR.POST.2
-    - ch6: /
-    - ch7: GIARD.ANT.2
-    - ch8: /
+# Device Version
+
+- MCU version: 5.1.4.1
+- Chip info: 374_W1
+- Device ID: 1

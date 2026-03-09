@@ -66,15 +66,15 @@ def summarize_6002(frames):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Confronta dump SmartMEye e mostra multiplex canali su 6002.")
-    parser.add_argument("pcaps", nargs="+", help="Percorsi pcap/pcapng")
+    parser = argparse.ArgumentParser(description="Compare SmartMEye captures and show channel multiplexing on port 6002.")
+    parser.add_argument("pcaps", nargs="+", help="pcap/pcapng paths")
     args = parser.parse_args()
 
     for pcap in args.pcaps:
         print(f"\n=== {pcap} ===")
         for port in (6001, 6002, 6003):
             streams = list_streams(pcap, port)
-            print(f"porta {port}: stream {streams}")
+            print(f"port {port}: streams {streams}")
             if not streams:
                 continue
 
@@ -85,14 +85,14 @@ def main():
 
             if port == 6002:
                 by_cmd, h264_hits = summarize_6002(all_frames)
-                print("  media cmd -> seq count:")
+                print("  media cmd -> seq counts:")
                 for cmd in sorted(by_cmd):
                     seq_summary = ", ".join(f"seq{seq}:{count}" for seq, count in sorted(by_cmd[cmd].items()))
                     print(f"    cmd {cmd}: {seq_summary}; h264@+12={h264_hits.get(cmd, 0)}")
                 if len(by_cmd) > 1:
-                    print("  nota: flusso MULTIPLEX su 6002 (piu canali insieme)")
+                    print("  note: MULTIPLEX stream on 6002 (multiple channels together)")
                 else:
-                    print("  nota: flusso singolo canale su 6002")
+                    print("  note: single-channel stream on 6002")
 
 
 if __name__ == "__main__":

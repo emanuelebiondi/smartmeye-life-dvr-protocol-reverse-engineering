@@ -26,7 +26,7 @@ def run_tshark(args):
     try:
         return subprocess.check_output(["tshark", *args], text=True, errors="ignore")
     except FileNotFoundError:
-        print("tshark non trovato nel PATH", file=sys.stderr)
+        print("tshark not found in PATH", file=sys.stderr)
         sys.exit(1)
 
 
@@ -101,7 +101,7 @@ def summarize_frame(idx, frame):
         value = struct.unpack("<I", frame.payload)[0]
         return base + f"\n    u32={value}"
 
-    # Check for H.264 start code and SPS/PPS (payload ha prefisso 12 byte)
+    # Check for H.264 start code and SPS/PPS (payload uses a 12-byte prefix)
     if frame.length > 16:  # 12 byte prefix + 4 byte start code
         h264_payload = frame.payload[12:]
         if h264_payload.startswith(b"\x00\x00\x00\x01"):
@@ -123,7 +123,7 @@ def summarize_frame(idx, frame):
 
 def analyze(pcap, port):
     streams = list_streams(pcap, port)
-    print(f"porta {port}: stream tcp {streams}")
+    print(f"port {port}: tcp streams {streams}")
     for stream_id in streams:
         print(f"\n== stream {stream_id} ==")
         chunks = follow_stream_hex(pcap, stream_id)
@@ -135,9 +135,9 @@ def analyze(pcap, port):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Decodifica il protocollo SmartMEye (DVRIP) da un pcapng.")
-    parser.add_argument("pcap", help="Path del file pcap/pcapng")
-    parser.add_argument("--port", type=int, action="append", default=[], help="Porta da analizzare")
+    parser = argparse.ArgumentParser(description="Decode SmartMEye (DVRIP) protocol frames from a pcapng.")
+    parser.add_argument("pcap", help="Path to pcap/pcapng file")
+    parser.add_argument("--port", type=int, action="append", default=[], help="Port to analyze")
     args = parser.parse_args()
 
     ports = args.port or [6001, 6002]

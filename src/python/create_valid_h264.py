@@ -28,7 +28,7 @@ def run_tshark(args):
     try:
         return subprocess.check_output(["tshark", *args], text=True, errors="ignore")
     except FileNotFoundError:
-        print("tshark non trovato nel PATH", file=sys.stderr)
+        print("tshark not found in PATH", file=sys.stderr)
         sys.exit(1)
 
 
@@ -88,7 +88,7 @@ def create_valid_h264_stream(frames, channel):
             if h264_payload.startswith(b"\x00\x00\x00\x01"):
                 nal_type = h264_payload[4] & 0x1F
                 if nal_type == 7: # SPS
-                    print(f"Trovato pacchetto di configurazione (SPS/PPS/IDR) nel frame con cmd={frame.cmd}")
+                    print(f"Found configuration packet (SPS/PPS/IDR) in frame cmd={frame.cmd}")
                     config_data = h264_payload
                     break # Stop after finding the first one
 
@@ -108,35 +108,35 @@ def create_valid_h264_stream(frames, channel):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Estrae un flusso H264 valido da un pcap del DVR.")
-    parser.add_argument("pcap", help="Path del file pcap/pcapng")
-    parser.add_argument("--port", type=int, default=6002, help="Porta dati del DVR")
-    parser.add_argument("--channel", type=int, default=5, help="Canale video da estrarre")
-    parser.add_argument("-o", "--output", default="video_corretto.h264", help="File H264 in uscita")
+    parser = argparse.ArgumentParser(description="Extract a valid H264 stream from a DVR pcap.")
+    parser.add_argument("pcap", help="Path to pcap/pcapng file")
+    parser.add_argument("--port", type=int, default=6002, help="DVR data port")
+    parser.add_argument("--channel", type=int, default=5, help="Video channel to extract")
+    parser.add_argument("-o", "--output", default="video_valid.h264", help="Output H264 file")
     args = parser.parse_args()
 
     streams = list_streams(args.pcap, args.port)
     if not streams:
-        print(f"Nessuno stream TCP trovato sulla porta {args.port}", file=sys.stderr)
+        print(f"No TCP stream found on port {args.port}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Trovato stream TCP {streams[0]} sulla porta {args.port}")
+    print(f"Found TCP stream {streams[0]} on port {args.port}")
 
     # We assume the first stream is the correct one
     stream_data = follow_stream_hex(args.pcap, streams[0])
     frames = parse_frames(stream_data)
 
-    print(f"Analizzati {len(frames)} frame dal protocollo proprietario.")
+    print(f"Analyzed {len(frames)} frames from the proprietary protocol.")
 
     h264_stream = create_valid_h264_stream(frames, args.channel)
 
     if not h264_stream:
-        print("Non è stato possibile estrarre un flusso H.264. Nessun pacchetto di configurazione trovato.", file=sys.stderr)
+        print("Could not extract a valid H.264 stream. No configuration packet found.", file=sys.stderr)
         sys.exit(1)
 
     Path(args.output).write_bytes(h264_stream)
-    print(f"Flusso H.264 valido scritto su {args.output} ({len(h264_stream)} byte)")
-    print("\nProva a riprodurlo con:\nffplay video_corretto.h264")
+    print(f"Valid H.264 stream written to {args.output} ({len(h264_stream)} bytes)")
+    print(f"\nTry playing it with:\nffplay {args.output}")
 
 
 if __name__ == "__main__":

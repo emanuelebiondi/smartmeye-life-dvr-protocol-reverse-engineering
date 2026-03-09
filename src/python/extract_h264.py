@@ -32,15 +32,15 @@ def extract_h264(src: bytes) -> bytes:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Estrae H264 da un dump raw della porta 6002.")
-    parser.add_argument("input", help="Dump raw proprietario")
-    parser.add_argument("-o", "--output", default="output.h264", help="File H264 in uscita")
+    parser = argparse.ArgumentParser(description="Extract H264 from a raw port-6002 dump.")
+    parser.add_argument("input", help="Raw proprietary dump")
+    parser.add_argument("-o", "--output", default="output.h264", help="Output H264 file")
     args = parser.parse_args()
 
     src = Path(args.input).read_bytes()
     h264 = extract_h264(src)
     Path(args.output).write_bytes(h264)
-    print(f"scritti {len(h264)} byte su {args.output}")
+    print(f"wrote {len(h264)} bytes to {args.output}")
 
 
 if __name__ == "__main__":

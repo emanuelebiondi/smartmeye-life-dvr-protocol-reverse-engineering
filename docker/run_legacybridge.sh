@@ -3,7 +3,7 @@ set -eu
 
 channel="${1:?channel required}"
 stream_override="${2:-}"
-# Dai dump NEW: cmd media 0..7, quindi cam utente 1..N => protocollo (channel + offset).
+# From NEW captures: media cmd is 0..7, so user camera 1..N maps to protocol (channel + offset).
 # Default offset -1: cam1->0, cam2->1, ...
 proto_offset="${DVR_PROTOCOL_OFFSET:--1}"
 proto="$((channel + proto_offset))"

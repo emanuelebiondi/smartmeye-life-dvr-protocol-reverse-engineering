@@ -11,7 +11,7 @@ echo
 echo "== go2rtc streams =="
 streams_json="$(curl -fsS "${api_url}/api/streams" || true)"
 if [ -z "${streams_json}" ]; then
-  echo "API non raggiungibile: ${api_url}/api/streams"
+  echo "API not reachable: ${api_url}/api/streams"
 else
   STREAMS_JSON="${streams_json}" python3 - <<'PY'
 import json
@@ -32,15 +32,15 @@ PY
 fi
 echo
 
-echo "== Ultimi log container =="
+echo "== Latest container logs =="
 docker logs --tail 40 "${container}" 2>&1 || true
 echo
 
-echo "== Ultime righe diag bridge =="
+echo "== Latest bridge diag lines =="
 docker exec "${container}" sh -lc '
 if [ -f /config/diag_cam1.log ]; then
   tail -n 40 /config/diag_cam1.log
 else
-  echo "/config/diag_cam1.log non trovato"
+  echo "/config/diag_cam1.log not found"
 fi
 ' 2>/dev/null || true
