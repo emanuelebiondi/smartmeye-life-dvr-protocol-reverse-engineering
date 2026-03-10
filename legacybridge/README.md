@@ -86,6 +86,9 @@ Single-session hub mode is also available for multi-camera stability:
 - `legacyhub` keeps one DVR session open;
 - go2rtc streams subscribe locally (`run_legacysubscriber`);
 - this avoids opening one DVR session per camera in parallel.
+- DVR supports up to 8 channels; enable only channels in use (`DVR_HUB_CHANNELS` + uncomment stream entries).
+
+Direct single-instance mode is still supported and useful for debugging/compatibility, but hub mode is recommended for multi-camera operation.
 
 ### go2rtc standalone
 

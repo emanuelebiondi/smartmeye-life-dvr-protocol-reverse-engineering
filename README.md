@@ -1,6 +1,6 @@
-# SmartMEye Life DVR Protocol Reverse Engineering
+# SmartMeye Life DVR Protocol Reverse Engineering
 
-Bridge and tooling to extract H.264 video from a legacy DVR that uses **DVRIP** with the **SmartMEye** app.  
+Bridge and tooling to extract H.264 video from a legacy DVR that uses **DVRIP** with the **SmartMeye** app.  
 Magic: `5a 5a aa 55`, ports: `6001` (command), `6002` (media).
 
 - **Device**: Life D/N/I 2013 (Life Electronics S.p.A.)
@@ -13,7 +13,7 @@ This project started as a personal engineering effort during my Computer Enginee
 
 Main goals:
 - keep a still-working legacy DVR in service instead of discarding it;
-- remove dependency on deprecated software (`SmartMEye`) and deprecated browser technology (ActiveX).
+- remove dependency on deprecated software (`SmartMeye`) and deprecated browser technology (ActiveX).
 
 The key challenge was reverse engineering a proprietary protocol with no ready-to-use public implementation for this exact DVR family.
 
@@ -31,6 +31,8 @@ Available active go2rtc stream profiles:
 
 Additional direct profiles (`*_main`, `*_sub`, `*_auto`) are kept as commented documentation in
 `docker/config/go2rtc.yaml`.
+Channels `6..8` are documented/commented and can be enabled if those inputs are used.
+Legacy single-instance/direct mode is still supported for debugging and compatibility.
 
 ## Hub Architecture (Single DVR Session)
 
@@ -44,7 +46,16 @@ Stream profile selection in hub mode is global:
 - `DVR_STREAM=0` -> main stream;
 - `DVR_STREAM=1` -> sub stream.
 
-So `dvr_cam1..5` all use the same profile selected in `.env`.
+So `dvr_cam1..8` all use the same profile selected in `.env`.
+
+Recommendation:
+- use hub mode for multi-camera usage;
+- use direct mode only for targeted diagnostics or firmware compatibility checks.
+
+Channel count note:
+- the DVR protocol/device supports up to 8 channels;
+- in this deployment only channels 1..5 are enabled by default;
+- to enable more, update `DVR_HUB_CHANNELS` and uncomment `dvr_cam6..dvr_cam8` in `go2rtc.yaml`.
 
 ## Project structure
 
@@ -109,7 +120,8 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
 ## Changelog
 
 - 2026-03-10
-  - Added single-session hub architecture (`legacyhub`) with local subscriber mode.
-  - Added `--hub` and `--subscribe` runtime modes in `legacybridge`.
-  - Updated Docker stack to run `legacyhub` + `go2rtc`.
-  - Simplified active go2rtc profiles to `dvr_cam1..5`; kept direct profiles commented as documentation.
+  - Added: single-session hub architecture (`legacyhub`) with local subscriber mode.
+  - Added: `--hub` and `--subscribe` runtime modes in `legacybridge`.
+  - Changed: Docker stack now runs `legacyhub` + `go2rtc`.
+  - Changed: active go2rtc profiles simplified to `dvr_cam1..5` (hub subscriber mode).
+  - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.

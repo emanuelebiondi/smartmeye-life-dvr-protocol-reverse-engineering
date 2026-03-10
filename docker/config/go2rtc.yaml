@@ -1,5 +1,6 @@
 streams:
   # Active profiles (hub subscriber, single DVR session via legacyhub)
+  # DVR supports up to 8 channels; enable only physically used channels.
   dvr_cam1:
     - exec:/usr/local/bin/run_legacysubscriber 1
   dvr_cam2:
@@ -10,6 +11,12 @@ streams:
     - exec:/usr/local/bin/run_legacysubscriber 4
   dvr_cam5:
     - exec:/usr/local/bin/run_legacysubscriber 5
+  # dvr_cam6:
+  #   - exec:/usr/local/bin/run_legacysubscriber 6
+  # dvr_cam7:
+  #   - exec:/usr/local/bin/run_legacysubscriber 7
+  # dvr_cam8:
+  #   - exec:/usr/local/bin/run_legacysubscriber 8
 
   # Documentation only: old hub alias names (disabled)
   # dvrh_cam1:
