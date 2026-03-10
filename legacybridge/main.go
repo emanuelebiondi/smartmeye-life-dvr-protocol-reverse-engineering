@@ -559,6 +559,7 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 		p.conns[conn] = struct{}{}
 		boot := append([]byte(nil), p.boot...)
 		p.mu.Unlock()
+		go p.watchDisconnect(conn)
 		if p.m != nil {
 			p.m.addSubscriber(p.ch.proto, 1)
 		}
@@ -566,13 +567,7 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 			_ = conn.SetWriteDeadline(time.Now().Add(1200 * time.Millisecond))
 			if _, err := conn.Write(boot); err != nil {
 				_ = conn.Close()
-				p.mu.Lock()
-				delete(p.conns, conn)
-				p.mu.Unlock()
-				if p.m != nil {
-					p.m.addSubscriber(p.ch.proto, -1)
-					p.m.addDrop("subscriber_bootstrap_write_error")
-				}
+				p.removeConn(conn, "subscriber_bootstrap_write_error")
 				continue
 			}
 		}
@@ -582,35 +577,66 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 	}
 }
 
+func (p *hubPublisher) watchDisconnect(conn net.Conn) {
+	_, _ = io.Copy(io.Discard, conn)
+	p.removeConn(conn, "")
+}
+
+func (p *hubPublisher) removeConn(conn net.Conn, dropReason string) {
+	p.mu.Lock()
+	if _, ok := p.conns[conn]; !ok {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.conns, conn)
+	p.mu.Unlock()
+	if p.m != nil {
+		p.m.addSubscriber(p.ch.proto, -1)
+		if dropReason != "" {
+			p.m.addDrop(dropReason)
+		}
+	}
+}
+
 func (p *hubPublisher) publish(payload []byte, keyframe bool) {
 	p.mu.Lock()
 	if keyframe {
 		p.boot = append(p.boot[:0], payload...)
 	}
-	defer p.mu.Unlock()
+	conns := make([]net.Conn, 0, len(p.conns))
 	for conn := range p.conns {
-		_ = conn.SetWriteDeadline(time.Now().Add(800 * time.Millisecond))
+		conns = append(conns, conn)
+	}
+	p.mu.Unlock()
+
+	var dead []net.Conn
+	for _, conn := range conns {
+		_ = conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
 		if _, err := conn.Write(payload); err != nil {
 			_ = conn.Close()
-			delete(p.conns, conn)
-			if p.m != nil {
-				p.m.addSubscriber(p.ch.proto, -1)
-				p.m.addDrop("subscriber_write_error")
-			}
+			dead = append(dead, conn)
 		}
+	}
+
+	if len(dead) == 0 {
+		return
+	}
+	for _, conn := range dead {
+		p.removeConn(conn, "subscriber_write_error")
 	}
 }
 
 func (p *hubPublisher) close() {
 	_ = p.ln.Close()
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	conns := make([]net.Conn, 0, len(p.conns))
 	for conn := range p.conns {
+		conns = append(conns, conn)
+	}
+	p.mu.Unlock()
+	for _, conn := range conns {
 		_ = conn.Close()
-		delete(p.conns, conn)
-		if p.m != nil {
-			p.m.addSubscriber(p.ch.proto, -1)
-		}
+		p.removeConn(conn, "")
 	}
 }
 

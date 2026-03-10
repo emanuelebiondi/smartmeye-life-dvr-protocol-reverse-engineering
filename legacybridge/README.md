@@ -146,3 +146,5 @@ See full context in:
   - Changed: `--include-seq2` now defaults to `true`.
   - Fixed: hub mode now forwards `frame_type=2` continuation packets for smooth live FPS.
   - Fixed: hub mode now opens `--diag-file` correctly (`DVR_DIAG_FILE` support in `legacyhub`).
+  - Fixed: resolved a deadlock risk in hub subscriber publish/cleanup caused by nested locking during stale connection removal.
+  - Fixed: hub publisher now removes disconnected/stale subscriber sockets and avoids reopen lockups after repeated open/close.
