@@ -46,6 +46,7 @@ ffplay camera1.h264
 - `--channel-base` channel base for mapping logic
 - `--protocol-channel` explicit protocol channel override
 - `--stream` stream profile (`0` main, `1` sub in common setups)
+- `--include-seq2` include `frame_type=2` continuation packets (default `true`)
 - `--keepalive` keepalive interval (default `1s`)
 - `--reconnect` reconnect delay (default `3s`)
 - `--verbose` verbose stderr logging
@@ -97,6 +98,7 @@ Single-session hub mode is also available for multi-camera stability:
 - go2rtc streams subscribe locally (`run_legacysubscriber`);
 - this avoids opening one DVR session per camera in parallel.
 - DVR supports up to 8 channels; enable only channels in use (`DVR_HUB_CHANNELS` + uncomment stream entries).
+- `DVR_DIAG_FILE` works in hub mode too (diagnostics emitted by `legacyhub`).
 
 Direct single-instance mode is still supported and useful for debugging/compatibility, but hub mode is recommended for multi-camera operation.
 
@@ -115,9 +117,14 @@ streams:
 If playback is gray/corrupted:
 - verify channel mapping (`--channel-base` / `--protocol-channel`);
 - try `--stream 1` (substream);
+- ensure continuation packets are enabled (`--include-seq2=true`, default);
 - enable `--verbose`;
 - use `--diag-file` to inspect frame type/drop/sync behavior;
 - confirm Annex-B start codes (`00 00 00 01`) in generated output.
+
+If live view is very slow (for example ~1 frame every 5-6 seconds):
+- this is usually caused by dropped continuation packets;
+- keep `--include-seq2=true` and update to the latest hub parser version.
 
 Important:
 - keep `stdout` for video only;
@@ -131,3 +138,11 @@ For playback protocol probing, use:
 
 See full context in:
 - `docs/REVERSE_ENGINEERING_PROCESS.md`
+
+## Changelog
+
+- 2026-03-10
+  - Changed: documented the guided, sectioned `docker/.env.example` template and clarified mapping priority (`DVR_CHANNEL_MAP` over `DVR_PROTOCOL_OFFSET`).
+  - Changed: `--include-seq2` now defaults to `true`.
+  - Fixed: hub mode now forwards `frame_type=2` continuation packets for smooth live FPS.
+  - Fixed: hub mode now opens `--diag-file` correctly (`DVR_DIAG_FILE` support in `legacyhub`).

@@ -131,4 +131,7 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
   - Changed: Docker stack now runs `legacyhub` + `go2rtc`.
   - Changed: active go2rtc profiles simplified to `dvr_cam1..5` (hub subscriber mode).
   - Changed: `docker/.env.example` is now a guided, sectioned template with grouped settings and explicit mapping-priority notes (`DVR_CHANNEL_MAP` over `DVR_PROTOCOL_OFFSET`).
+  - Changed: frame continuation handling (`frame_type=2`) is enabled by default to keep smooth live FPS in both direct and hub modes.
+  - Fixed: hub parser now forwards `frame_type=2` continuation packets instead of dropping them, removing the "1 frame every 5-6 seconds" behavior.
+  - Fixed: `DVR_DIAG_FILE` is now wired for `legacyhub` too, so media diagnostics work in single-session mode.
   - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.

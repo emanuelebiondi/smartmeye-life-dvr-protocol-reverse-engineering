@@ -83,6 +83,7 @@ Fixes that made stream stable:
 - apply correct payload prefix stripping;
 - handle continuation packets consistently;
 - ignore keepalive/meta packets in H.264 output path.
+- in hub mode, forward `frame_type=2` continuation payloads (instead of dropping them), otherwise output degrades to sparse keyframes.
 
 Result:
 - stable live H.264 stream consumable by go2rtc.
@@ -105,6 +106,7 @@ Implemented pattern:
 - one `exec` source per channel (`dvr_cam1..dvr_cam5`);
 - `main/sub/auto` profiles;
 - configurable protocol-channel mapping.
+- single-session hub + local subscribers as default for multi-camera stability.
 
 ### 5.3 Docker operations
 
@@ -113,6 +115,8 @@ Operational additions:
 - `.env.example` for configuration;
 - healthcheck;
 - diagnostics helper script.
+- guided `.env.example` with explicit mapping-priority notes (`DVR_CHANNEL_MAP` over `DVR_PROTOCOL_OFFSET`);
+- hub diagnostics wiring (`DVR_DIAG_FILE`) for frame/drop troubleshooting in single-session mode.
 
 ## 6) Playback status
 
