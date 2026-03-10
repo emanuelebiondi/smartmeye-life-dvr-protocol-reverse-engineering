@@ -80,9 +80,12 @@ docker compose up -d --build
 
 Defined stream profiles in `docker/config/go2rtc.yaml`:
 - `dvr_cam1..dvr_cam5`
-- `dvr_camX_main`
-- `dvr_camX_sub`
-- `dvr_camX_auto`
+- direct `*_main/sub/auto` examples are present as commented documentation
+
+Single-session hub mode is also available for multi-camera stability:
+- `legacyhub` keeps one DVR session open;
+- go2rtc streams subscribe locally (`run_legacysubscriber`);
+- this avoids opening one DVR session per camera in parallel.
 
 ### go2rtc standalone
 

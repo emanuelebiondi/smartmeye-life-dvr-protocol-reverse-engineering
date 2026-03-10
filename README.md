@@ -26,11 +26,25 @@ docker compose up -d --build
 ./diag.sh
 ```
 
-Available go2rtc stream profiles:
-- `dvr_cam1..dvr_cam5` (default profile from `DVR_STREAM`)
-- `dvr_camX_main`
-- `dvr_camX_sub`
-- `dvr_camX_auto`
+Available active go2rtc stream profiles:
+- `dvr_cam1..dvr_cam5` (hub subscriber mode)
+
+Additional direct profiles (`*_main`, `*_sub`, `*_auto`) are kept as commented documentation in
+`docker/config/go2rtc.yaml`.
+
+## Hub Architecture (Single DVR Session)
+
+To keep multi-camera view stable on fragile legacy DVRs, this stack uses:
+
+- one `legacyhub` process with a single DVR session (`6001/6002`);
+- local per-channel subscriber endpoints;
+- go2rtc `exec` sources attached to those local subscribers.
+
+Stream profile selection in hub mode is global:
+- `DVR_STREAM=0` -> main stream;
+- `DVR_STREAM=1` -> sub stream.
+
+So `dvr_cam1..5` all use the same profile selected in `.env`.
 
 ## Project structure
 
@@ -91,3 +105,11 @@ python3 src/python/playback_probe.py \
 ```
 
 If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In that case, a dedicated Wireshark capture of an original "Remote Playback" session is needed.
+
+## Changelog
+
+- 2026-03-10
+  - Added single-session hub architecture (`legacyhub`) with local subscriber mode.
+  - Added `--hub` and `--subscribe` runtime modes in `legacybridge`.
+  - Updated Docker stack to run `legacyhub` + `go2rtc`.
+  - Simplified active go2rtc profiles to `dvr_cam1..5`; kept direct profiles commented as documentation.

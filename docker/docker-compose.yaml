@@ -1,4 +1,31 @@
 services:
+  legacyhub:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: local/go2rtc-legacybridge
+    container_name: legacyhub-bridge
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 10s
+    command: ["/usr/local/bin/run_legacyhub"]
+    environment:
+      - DVR_IP=${DVR_IP}
+      - DVR_USER=${DVR_USER}
+      - DVR_PASSWORD=${DVR_PASSWORD}
+      - DVR_CMD_PORT=${DVR_CMD_PORT:-6001}
+      - DVR_DATA_PORT=${DVR_DATA_PORT:-6002}
+      - DVR_STREAM=${DVR_STREAM:-0}
+      - DVR_KEEPALIVE=${DVR_KEEPALIVE:-1s}
+      - DVR_RECONNECT=${DVR_RECONNECT:-3s}
+      - DVR_VERBOSE=${DVR_VERBOSE:-0}
+      - DVR_PROTOCOL_OFFSET=${DVR_PROTOCOL_OFFSET:--1}
+      - DVR_HUB_BIND=${DVR_HUB_BIND:-127.0.0.1}
+      - DVR_HUB_PORT_BASE=${DVR_HUB_PORT_BASE:-9100}
+      - DVR_HUB_CHANNELS=${DVR_HUB_CHANNELS:-1,2,3,4,5}
+    volumes:
+      - ./config:/config
+
   go2rtc:
     build:
       context: ..
@@ -13,6 +40,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    depends_on:
+      - legacyhub
     stop_grace_period: 10s
     environment:
       - DVR_IP=${DVR_IP}

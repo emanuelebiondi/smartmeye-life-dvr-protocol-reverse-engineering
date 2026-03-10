@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,12 @@ type config struct {
 	strictFrameType  bool // DLL-style state machine: valid frame_type values {0,1,2,800}
 	diagFile         string
 	verbose          bool
+	hubMode          bool
+	hubChannels      string
+	hubBind          string
+	hubPortBase      int
+	hubProtoOffset   int
+	subscribeAddr    string
 }
 
 type frame struct {
@@ -100,6 +107,20 @@ type client struct {
 	haveOpenFrame       bool
 }
 
+type hubChannel struct {
+	user  int
+	proto uint32
+	port  int
+}
+
+type hubPublisher struct {
+	ch    hubChannel
+	ln    net.Listener
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	boot  []byte
+}
+
 func main() {
 	cfg := parseFlags()
 	loggerOut := io.Writer(io.Discard)
@@ -120,6 +141,20 @@ func main() {
 	defer stop()
 
 	cl := &client{cfg: cfg, logger: logger}
+	if cfg.subscribeAddr != "" {
+		if err := runSubscribe(ctx, cfg.subscribeAddr, os.Stdout, cfg.reconnect, logger, cfg.verbose); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if cfg.hubMode {
+		if err := cl.runHub(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := cl.run(ctx, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -150,8 +185,293 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.strictFrameType, "strict-frame-type", true, "Apply DLL-style media parsing (frame_type 0/1/2/800)")
 	flag.StringVar(&cfg.diagFile, "diag-file", "", "Write CSV-like media diagnostics (cmd,frame_type,seqid,len,meta,action)")
 	flag.BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logs on stderr")
+	flag.BoolVar(&cfg.hubMode, "hub", false, "Run as single-session DVR hub with per-channel local TCP outputs")
+	flag.StringVar(&cfg.hubChannels, "hub-channels", "1,2,3,4,5", "Hub user channels (comma-separated)")
+	flag.StringVar(&cfg.hubBind, "hub-bind", "127.0.0.1", "Hub bind address")
+	flag.IntVar(&cfg.hubPortBase, "hub-port-base", 9100, "Hub output base port; channel N is published on base+N")
+	flag.IntVar(&cfg.hubProtoOffset, "hub-protocol-offset", -1, "Protocol channel = user channel + offset (default -1)")
+	flag.StringVar(&cfg.subscribeAddr, "subscribe", "", "Subscribe mode: tcp address from hub, e.g. 127.0.0.1:9101")
 	flag.Parse()
 	return cfg
+}
+
+func parseHubMappings(chSpec string, protoOffset, portBase int) ([]hubChannel, error) {
+	raw := strings.Split(chSpec, ",")
+	seenUser := make(map[int]struct{})
+	seenProto := make(map[int]struct{})
+	mappings := make([]hubChannel, 0, len(raw))
+
+	for _, tok := range raw {
+		v := strings.TrimSpace(tok)
+		if v == "" {
+			continue
+		}
+		userCh, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hub channel %q: %w", v, err)
+		}
+		if userCh <= 0 {
+			return nil, fmt.Errorf("hub channel must be >= 1: %d", userCh)
+		}
+		if _, ok := seenUser[userCh]; ok {
+			continue
+		}
+		protoCh := userCh + protoOffset
+		if protoCh < 0 || protoCh > 7 {
+			return nil, fmt.Errorf("hub channel %d maps to invalid protocol channel %d", userCh, protoCh)
+		}
+		if _, ok := seenProto[protoCh]; ok {
+			return nil, fmt.Errorf("duplicate protocol channel %d in hub mapping", protoCh)
+		}
+		seenUser[userCh] = struct{}{}
+		seenProto[protoCh] = struct{}{}
+		mappings = append(mappings, hubChannel{
+			user:  userCh,
+			proto: uint32(protoCh),
+			port:  portBase + userCh,
+		})
+	}
+	if len(mappings) == 0 {
+		return nil, fmt.Errorf("empty hub channel set")
+	}
+	sort.Slice(mappings, func(i, j int) bool { return mappings[i].user < mappings[j].user })
+	return mappings, nil
+}
+
+func runSubscribe(ctx context.Context, addr string, out io.Writer, reconnect time.Duration, logger *log.Logger, verbose bool) error {
+	dialer := net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(reconnect):
+				continue
+			}
+		}
+		if verbose {
+			logger.Printf("subscribe connected to %s", addr)
+		}
+		_, copyErr := io.Copy(out, conn)
+		_ = conn.Close()
+		if copyErr == nil {
+			continue
+		}
+		if isBrokenPipe(copyErr) {
+			return nil
+		}
+		if verbose {
+			logger.Printf("subscribe stream ended: %v", copyErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(reconnect):
+		}
+	}
+}
+
+func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbose bool) {
+	tcpLn, _ := p.ln.(*net.TCPListener)
+	for {
+		if tcpLn != nil {
+			_ = tcpLn.SetDeadline(time.Now().Add(time.Second))
+		}
+		conn, err := p.ln.Accept()
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if verbose {
+				logger.Printf("hub ch=%d accept error: %v", p.ch.user, err)
+			}
+			continue
+		}
+		p.mu.Lock()
+		p.conns[conn] = struct{}{}
+		boot := append([]byte(nil), p.boot...)
+		p.mu.Unlock()
+		if len(boot) > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(1200 * time.Millisecond))
+			if _, err := conn.Write(boot); err != nil {
+				_ = conn.Close()
+				p.mu.Lock()
+				delete(p.conns, conn)
+				p.mu.Unlock()
+				continue
+			}
+		}
+		if verbose {
+			logger.Printf("hub ch=%d subscriber connected from %s", p.ch.user, conn.RemoteAddr())
+		}
+	}
+}
+
+func (p *hubPublisher) publish(payload []byte, keyframe bool) {
+	p.mu.Lock()
+	if keyframe {
+		p.boot = append(p.boot[:0], payload...)
+	}
+	defer p.mu.Unlock()
+	for conn := range p.conns {
+		_ = conn.SetWriteDeadline(time.Now().Add(800 * time.Millisecond))
+		if _, err := conn.Write(payload); err != nil {
+			_ = conn.Close()
+			delete(p.conns, conn)
+		}
+	}
+}
+
+func (p *hubPublisher) close() {
+	_ = p.ln.Close()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for conn := range p.conns {
+		_ = conn.Close()
+		delete(p.conns, conn)
+	}
+}
+
+func (c *client) makeHubPublishers(ctx context.Context, mappings []hubChannel) (map[uint32]*hubPublisher, error) {
+	out := make(map[uint32]*hubPublisher, len(mappings))
+	for _, m := range mappings {
+		addr := net.JoinHostPort(c.cfg.hubBind, strconv.Itoa(m.port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			for _, p := range out {
+				p.close()
+			}
+			return nil, fmt.Errorf("hub listen channel=%d addr=%s: %w", m.user, addr, err)
+		}
+		p := &hubPublisher{
+			ch:    m,
+			ln:    ln,
+			conns: make(map[net.Conn]struct{}),
+		}
+		out[m.proto] = p
+		go p.acceptLoop(ctx, c.logger, c.cfg.verbose)
+		if c.cfg.verbose {
+			c.logger.Printf("hub publish user_ch=%d proto_ch=%d on tcp://%s", m.user, m.proto, addr)
+		}
+	}
+	return out, nil
+}
+
+func (c *client) closeHubPublishers(pubs map[uint32]*hubPublisher) {
+	for _, p := range pubs {
+		p.close()
+	}
+}
+
+func (c *client) runHub(ctx context.Context) error {
+	mappings, err := parseHubMappings(c.cfg.hubChannels, c.cfg.hubProtoOffset, c.cfg.hubPortBase)
+	if err != nil {
+		return err
+	}
+	if c.cfg.verbose {
+		c.logger.Printf("hub mode enabled: channels=%s bind=%s base_port=%d proto_offset=%d",
+			c.cfg.hubChannels, c.cfg.hubBind, c.cfg.hubPortBase, c.cfg.hubProtoOffset)
+	}
+	pubs, err := c.makeHubPublishers(ctx, mappings)
+	if err != nil {
+		return err
+	}
+	defer c.closeHubPublishers(pubs)
+
+	for {
+		err := c.runHubOnce(ctx, mappings, pubs)
+		if err == nil || errors.Is(err, context.Canceled) {
+			return err
+		}
+		if c.cfg.verbose {
+			c.logger.Printf("hub session ended: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.cfg.reconnect):
+		}
+	}
+}
+
+func (c *client) runHubOnce(ctx context.Context, mappings []hubChannel, pubs map[uint32]*hubPublisher) error {
+	if err := c.connect(); err != nil {
+		return err
+	}
+	defer c.close()
+
+	loginReply, err := c.login()
+	if err != nil {
+		return err
+	}
+	if c.cfg.verbose {
+		c.logger.Printf("hub login ok: %s", compactXML(loginReply.payload))
+	}
+
+	drainDone := make(chan error, 1)
+	go func() {
+		drainDone <- c.drainCmd(ctx)
+	}()
+
+	if err := c.bootstrap(); err != nil {
+		return err
+	}
+
+	for _, m := range mappings {
+		if err := c.sendStreamChRequest(int(m.proto)); err != nil {
+			return err
+		}
+	}
+
+	socketID, err := c.readSocketID()
+	if err != nil {
+		return err
+	}
+	if c.cfg.verbose {
+		c.logger.Printf("hub socket_id=%d", socketID)
+	}
+	for _, m := range mappings {
+		if err := c.openChannel(int(m.proto), socketID); err != nil {
+			return err
+		}
+	}
+
+	keepDone := make(chan error, 1)
+	go func() {
+		keepDone <- c.keepAliveLoop(ctx)
+	}()
+
+	streamErr := c.streamHubMedia(ctx, pubs)
+
+	select {
+	case err := <-keepDone:
+		if err != nil && !errors.Is(err, context.Canceled) && c.cfg.verbose {
+			c.logger.Printf("hub keepalive: %v", err)
+		}
+	default:
+	}
+
+	select {
+	case err := <-drainDone:
+		if err != nil && !errors.Is(err, context.Canceled) && c.cfg.verbose {
+			c.logger.Printf("hub cmd drain: %v", err)
+		}
+	default:
+	}
+
+	return streamErr
 }
 
 func (c *client) run(ctx context.Context, out io.Writer) error {
@@ -583,6 +903,118 @@ func (c *client) streamMedia(ctx context.Context, out io.Writer) error {
 			return err
 		}
 	}
+}
+
+func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublisher) error {
+	pending := make([]byte, 0, 256*1024)
+	tmp := make([]byte, 64*1024)
+	synced := make(map[uint32]bool, len(pubs))
+
+	for {
+		if err := c.dataConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			return err
+		}
+		n, err := c.dataReader.Read(tmp)
+		if n > 0 {
+			pending = append(pending, tmp[:n]...)
+			consumed, procErr := c.processHubMediaFrames(pending, pubs, synced)
+			if procErr != nil {
+				return procErr
+			}
+			if consumed > 0 {
+				pending = append(pending[:0], pending[consumed:]...)
+			}
+		}
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				continue
+			}
+			return err
+		}
+	}
+}
+
+func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPublisher, synced map[uint32]bool) (int, error) {
+	i := 0
+	for i+mediaHeaderLen <= len(pending) {
+		if !bytes.Equal(pending[i:i+4], magic) {
+			j := bytes.Index(pending[i+1:], magic)
+			if j < 0 {
+				if len(pending) > 3 {
+					return len(pending) - 3, nil
+				}
+				return 0, nil
+			}
+			i += j + 1
+			continue
+		}
+		payloadLen := int(be32le(pending[i+40 : i+44]))
+		if payloadLen < 0 || payloadLen > 8*1024*1024 {
+			i++
+			continue
+		}
+		frameLen := mediaHeaderLen + payloadLen
+		if len(pending) < i+frameLen {
+			break
+		}
+		frameBytes := pending[i : i+frameLen]
+		cmd := be32le(frameBytes[4:8])
+		frameType := be32le(frameBytes[8:12])
+		payload := frameBytes[mediaHeaderLen:]
+
+		// ACK every media packet to keep DVR synchronized.
+		_ = c.writeData(buildFrame(cmd, 2, mediaAckFlag, mediaAckSession, 0, nil))
+
+		pub, ok := pubs[cmd]
+		if !ok {
+			i += frameLen
+			continue
+		}
+		if c.cfg.strictFrameType {
+			if frameType != 0 && frameType != 1 && frameType != 2 && frameType != 800 {
+				i += frameLen
+				continue
+			}
+		}
+		if payloadLen == 0 {
+			i += frameLen
+			continue
+		}
+		if frameType != 0 && frameType != 1 {
+			i += frameLen
+			continue
+		}
+
+		start := startcodeOffset(payload)
+		if start < 0 || start >= len(payload) {
+			i += frameLen
+			continue
+		}
+		chunk := payload[start:]
+		if len(chunk) == 0 {
+			i += frameLen
+			continue
+		}
+		if !synced[cmd] {
+			if frameType != 0 || !isKeyframeOrConfig(chunk) {
+				i += frameLen
+				continue
+			}
+			synced[cmd] = true
+			if c.cfg.verbose {
+				c.logger.Printf("hub sync acquired user_ch=%d proto_ch=%d", pub.ch.user, pub.ch.proto)
+			}
+		}
+		pub.publish(chunk, frameType == 0)
+		i += frameLen
+	}
+	return i, nil
 }
 
 // #region agent log

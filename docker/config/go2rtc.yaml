@@ -1,56 +1,69 @@
 streams:
-  # Default stream (uses DVR_STREAM from .env: 0 main, 1 sub)
+  # Active profiles (hub subscriber, single DVR session via legacyhub)
   dvr_cam1:
-    - exec:/usr/local/bin/run_legacybridge 1#preload
+    - exec:/usr/local/bin/run_legacysubscriber 1
   dvr_cam2:
-    - exec:/usr/local/bin/run_legacybridge 2#preload
+    - exec:/usr/local/bin/run_legacysubscriber 2
   dvr_cam3:
-    - exec:/usr/local/bin/run_legacybridge 3#preload
+    - exec:/usr/local/bin/run_legacysubscriber 3
   dvr_cam4:
-    - exec:/usr/local/bin/run_legacybridge 4#preload
+    - exec:/usr/local/bin/run_legacysubscriber 4
   dvr_cam5:
-    - exec:/usr/local/bin/run_legacybridge 5#preload
+    - exec:/usr/local/bin/run_legacysubscriber 5
 
-  # Explicit quality/latency profiles per channel
-  dvr_cam1_main:
-    - exec:/usr/local/bin/run_legacybridge 1 0#preload
-  dvr_cam1_sub:
-    - exec:/usr/local/bin/run_legacybridge 1 1#preload
-  dvr_cam1_auto:
-    - exec:/usr/local/bin/run_legacybridge 1 1#preload
-    - exec:/usr/local/bin/run_legacybridge 1 0#preload
+  # Documentation only: old hub alias names (disabled)
+  # dvrh_cam1:
+  #   - exec:/usr/local/bin/run_legacysubscriber 1
+  # dvrh_cam2:
+  #   - exec:/usr/local/bin/run_legacysubscriber 2
+  # dvrh_cam3:
+  #   - exec:/usr/local/bin/run_legacysubscriber 3
+  # dvrh_cam4:
+  #   - exec:/usr/local/bin/run_legacysubscriber 4
+  # dvrh_cam5:
+  #   - exec:/usr/local/bin/run_legacysubscriber 5
 
-  dvr_cam2_main:
-    - exec:/usr/local/bin/run_legacybridge 2 0#preload
-  dvr_cam2_sub:
-    - exec:/usr/local/bin/run_legacybridge 2 1#preload
-  dvr_cam2_auto:
-    - exec:/usr/local/bin/run_legacybridge 2 1#preload
-    - exec:/usr/local/bin/run_legacybridge 2 0#preload
+  # Documentation only: direct per-channel sessions (disabled)
+  # NOTE: enabling these may reintroduce multi-session instability on legacy DVRs.
+  # dvr_cam1_main:
+  #   - exec:/usr/local/bin/run_legacybridge 1 0#preload
+  # dvr_cam1_sub:
+  #   - exec:/usr/local/bin/run_legacybridge 1 1#preload
+  # dvr_cam1_auto:
+  #   - exec:/usr/local/bin/run_legacybridge 1 1#preload
+  #   - exec:/usr/local/bin/run_legacybridge 1 0#preload
 
-  dvr_cam3_main:
-    - exec:/usr/local/bin/run_legacybridge 3 0#preload
-  dvr_cam3_sub:
-    - exec:/usr/local/bin/run_legacybridge 3 1#preload
-  dvr_cam3_auto:
-    - exec:/usr/local/bin/run_legacybridge 3 1#preload
-    - exec:/usr/local/bin/run_legacybridge 3 0#preload
+  # dvr_cam2_main:
+  #   - exec:/usr/local/bin/run_legacybridge 2 0#preload
+  # dvr_cam2_sub:
+  #   - exec:/usr/local/bin/run_legacybridge 2 1#preload
+  # dvr_cam2_auto:
+  #   - exec:/usr/local/bin/run_legacybridge 2 1#preload
+  #   - exec:/usr/local/bin/run_legacybridge 2 0#preload
 
-  dvr_cam4_main:
-    - exec:/usr/local/bin/run_legacybridge 4 0#preload
-  dvr_cam4_sub:
-    - exec:/usr/local/bin/run_legacybridge 4 1#preload
-  dvr_cam4_auto:
-    - exec:/usr/local/bin/run_legacybridge 4 1#preload
-    - exec:/usr/local/bin/run_legacybridge 4 0#preload
+  # dvr_cam3_main:
+  #   - exec:/usr/local/bin/run_legacybridge 3 0#preload
+  # dvr_cam3_sub:
+  #   - exec:/usr/local/bin/run_legacybridge 3 1#preload
+  # dvr_cam3_auto:
+  #   - exec:/usr/local/bin/run_legacybridge 3 1#preload
+  #   - exec:/usr/local/bin/run_legacybridge 3 0#preload
 
-  dvr_cam5_main:
-    - exec:/usr/local/bin/run_legacybridge 5 0#preload
-  dvr_cam5_sub:
-    - exec:/usr/local/bin/run_legacybridge 5 1#preload
-  dvr_cam5_auto:
-    - exec:/usr/local/bin/run_legacybridge 5 1#preload
-    - exec:/usr/local/bin/run_legacybridge 5 0#preload
+  # dvr_cam4_main:
+  #   - exec:/usr/local/bin/run_legacybridge 4 0#preload
+  # dvr_cam4_sub:
+  #   - exec:/usr/local/bin/run_legacybridge 4 1#preload
+  # dvr_cam4_auto:
+  #   - exec:/usr/local/bin/run_legacybridge 4 1#preload
+  #   - exec:/usr/local/bin/run_legacybridge 4 0#preload
+
+  # dvr_cam5_main:
+  #   - exec:/usr/local/bin/run_legacybridge 5 0#preload
+  # dvr_cam5_sub:
+  #   - exec:/usr/local/bin/run_legacybridge 5 1#preload
+  # dvr_cam5_auto:
+  #   - exec:/usr/local/bin/run_legacybridge 5 1#preload
+  #   - exec:/usr/local/bin/run_legacybridge 5 0#preload
 
 api:
   listen: ":1984"
