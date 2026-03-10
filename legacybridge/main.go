@@ -242,7 +242,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.keepAlive, "keepalive", time.Second, "Keepalive period")
 	flag.DurationVar(&cfg.reconnect, "reconnect", 3*time.Second, "Delay before reconnect")
 	flag.StringVar(&cfg.dumpFile, "dump", "", "Read a raw 6002 dump and write H264 to stdout")
-	flag.BoolVar(&cfg.includeSeq2, "include-seq2", false, "Include seq=2/3 frames from media stream")
+	flag.BoolVar(&cfg.includeSeq2, "include-seq2", true, "Include frame_type=2 continuation packets (recommended; disable only for incompatible firmware)")
 	flag.IntVar(&cfg.mediaOffset, "media-offset", 12, "Media payload byte offset before H.264 (default 12; try 8 or 16 if video is gray)")
 	// In captures, seq=1 and seq=2 packets with payload always include a 12-byte prefix (a7724a69...); continuation = payload[12:].
 	flag.BoolVar(&cfg.continuation0, "continuation-no-prefix", false, "If true, continuation without prefix (payload[0:]); default false = always 12-byte prefix from captures")
@@ -683,6 +683,10 @@ func (c *client) runHubOnce(ctx context.Context, mappings []hubChannel, pubs map
 		return err
 	}
 	defer c.close()
+	if err := c.openDiag(); err != nil {
+		return err
+	}
+	defer c.closeDiag()
 
 	loginReply, err := c.login()
 	if err != nil {
@@ -1187,6 +1191,7 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 	pending := make([]byte, 0, 256*1024)
 	tmp := make([]byte, 64*1024)
 	synced := make(map[uint32]bool, len(pubs))
+	openFrame := make(map[uint32]bool, len(pubs))
 
 	for {
 		if err := c.dataConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -1195,7 +1200,7 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 		n, err := c.dataReader.Read(tmp)
 		if n > 0 {
 			pending = append(pending, tmp[:n]...)
-			consumed, procErr := c.processHubMediaFrames(pending, pubs, synced)
+			consumed, procErr := c.processHubMediaFrames(pending, pubs, synced, openFrame)
 			if procErr != nil {
 				return procErr
 			}
@@ -1218,7 +1223,7 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 	}
 }
 
-func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPublisher, synced map[uint32]bool) (int, error) {
+func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPublisher, synced map[uint32]bool, openFrame map[uint32]bool) (int, error) {
 	i := 0
 	for i+mediaHeaderLen <= len(pending) {
 		if !bytes.Equal(pending[i:i+4], magic) {
@@ -1265,6 +1270,28 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 			i += frameLen
 			continue
 		}
+		if frameType == 2 {
+			if !c.cfg.includeSeq2 {
+				c.metrics.addDrop("hub_ignore_type2")
+				i += frameLen
+				continue
+			}
+			if !synced[cmd] || !openFrame[cmd] {
+				c.metrics.addDrop("hub_wait_sync_cont")
+				i += frameLen
+				continue
+			}
+			chunk := c.continuationChunk(payload)
+			if len(chunk) == 0 {
+				c.metrics.addDrop("hub_empty_cont")
+				i += frameLen
+				continue
+			}
+			c.metrics.addFrame(cmd, len(chunk))
+			pub.publish(chunk, false)
+			i += frameLen
+			continue
+		}
 		if frameType != 0 && frameType != 1 {
 			c.metrics.addDrop("hub_non_video_frame_type")
 			i += frameLen
@@ -1297,6 +1324,7 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 		}
 		c.metrics.addFrame(cmd, len(chunk))
 		pub.publish(chunk, frameType == 0)
+		openFrame[cmd] = true
 		i += frameLen
 	}
 	return i, nil
@@ -1452,8 +1480,26 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 				c.lastWasIDRStart = frameType == 0
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start")
 			case 2:
-				// In NEW captures, type=2 is a metadata block (typically 164 bytes), not H264 Annex-B.
-				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_type2")
+				if !c.cfg.includeSeq2 {
+					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_type2")
+					break
+				}
+				if !c.haveOpenFrame {
+					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_cont_without_start")
+					c.metrics.addDrop("single_drop_cont_without_start")
+					break
+				}
+				toOut := c.continuationChunk(payload)
+				if len(toOut) == 0 {
+					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_empty_cont")
+					c.metrics.addDrop("single_drop_empty_cont")
+					break
+				}
+				if _, err := out.Write(toOut); err != nil {
+					return i, state, err
+				}
+				c.metrics.addFrame(cmd, len(toOut))
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_cont")
 			case 800:
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_socket_id")
 			default:
@@ -1783,6 +1829,24 @@ func startcodeOffset(payload []byte) int {
 		}
 	}
 	return -1
+}
+
+func (c *client) continuationChunk(payload []byte) []byte {
+	off := mediaPrefixLen
+	if c.cfg.continuation0 {
+		off = 0
+	}
+	if off >= len(payload) {
+		return nil
+	}
+	chunk := payload[off:]
+	if c.cfg.continuationSkip > 0 {
+		if c.cfg.continuationSkip >= len(chunk) {
+			return nil
+		}
+		chunk = chunk[c.cfg.continuationSkip:]
+	}
+	return chunk
 }
 
 var annexBStartCode = []byte{0x00, 0x00, 0x00, 0x01}

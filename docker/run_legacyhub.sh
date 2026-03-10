@@ -20,6 +20,10 @@ if [ -n "${DVR_CHANNEL_MAP:-}" ]; then
   set -- "$@" --channel-map "${DVR_CHANNEL_MAP}"
 fi
 
+if [ -n "${DVR_DIAG_FILE:-}" ]; then
+  set -- "$@" --diag-file "${DVR_DIAG_FILE}"
+fi
+
 if [ -n "${DVR_METRICS_ADDR:-}" ]; then
   set -- "$@" --metrics-addr "${DVR_METRICS_ADDR}"
 fi
