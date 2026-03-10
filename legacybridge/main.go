@@ -45,14 +45,18 @@ func dbgLog(hypID, location, message string, data map[string]interface{}) {
 // #endregion
 
 const (
-	headerLen       = 32
-	mediaHeaderLen  = 44
-	mediaPrefixLen  = 12
-	loginSession    = 0xffffffff
-	keepAliveCmd    = 0x0000
-	keepAliveSeq    = 801
-	mediaAckSession = 0x64 // session used for client->server ACKs in captures (0x64=100)
-	mediaAckFlag    = 0x02 // ACK flag (captures: client->server seq=2 flag=0x00000002)
+	headerLen        = 32
+	mediaHeaderLen   = 44
+	mediaPrefixLen   = 12
+	loginSession     = 0xffffffff
+	keepAliveCmd     = 0x0000
+	keepAliveSeq     = 801
+	mediaAckSession  = 0x64 // session used for client->server ACKs in captures (0x64=100)
+	mediaAckFlag     = 0x02 // ACK flag (captures: client->server seq=2 flag=0x00000002)
+	mediaAckEvery    = 250 * time.Millisecond
+	mediaAckTimeout  = 25 * time.Millisecond
+	mediaReadTimeout = 5 * time.Second
+	mediaStallAfter  = 15 * time.Second
 )
 
 type config struct {
@@ -105,7 +109,10 @@ type client struct {
 	cmdConn             net.Conn
 	dataConn            net.Conn
 	dataReader          *bufio.Reader
-	mu                  sync.Mutex
+	cmdMu               sync.Mutex
+	dataMu              sync.Mutex
+	ackMu               sync.Mutex
+	lastMediaAck        map[uint32]time.Time
 	diagMu              sync.Mutex
 	diagWriter          *bufio.Writer
 	diagFile            *os.File
@@ -124,9 +131,23 @@ type hubPublisher struct {
 	ch    hubChannel
 	ln    net.Listener
 	mu    sync.Mutex
-	conns map[net.Conn]struct{}
+	conns map[net.Conn]*hubSubscriber
 	boot  []byte
 	m     *bridgeMetrics
+}
+
+type hubSubscriber struct {
+	conn net.Conn
+	send chan []byte
+	stop chan struct{}
+	once sync.Once
+}
+
+func (s *hubSubscriber) close() {
+	s.once.Do(func() {
+		close(s.stop)
+		_ = s.conn.Close()
+	})
 }
 
 type bridgeMetrics struct {
@@ -556,20 +577,24 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 			continue
 		}
 		p.mu.Lock()
-		p.conns[conn] = struct{}{}
 		boot := append([]byte(nil), p.boot...)
 		p.mu.Unlock()
-		go p.watchDisconnect(conn)
+		sub := &hubSubscriber{
+			conn: conn,
+			send: make(chan []byte, 256),
+			stop: make(chan struct{}),
+		}
+		p.mu.Lock()
+		p.conns[conn] = sub
+		p.mu.Unlock()
+		go p.writerLoop(sub)
+		go p.watchDisconnect(sub)
+		if len(boot) > 0 && !p.enqueue(sub, boot) {
+			p.removeConn(conn, "subscriber_bootstrap_queue_full")
+			continue
+		}
 		if p.m != nil {
 			p.m.addSubscriber(p.ch.proto, 1)
-		}
-		if len(boot) > 0 {
-			_ = conn.SetWriteDeadline(time.Now().Add(1200 * time.Millisecond))
-			if _, err := conn.Write(boot); err != nil {
-				_ = conn.Close()
-				p.removeConn(conn, "subscriber_bootstrap_write_error")
-				continue
-			}
 		}
 		if verbose {
 			logger.Printf("hub ch=%d subscriber connected from %s", p.ch.user, conn.RemoteAddr())
@@ -577,20 +602,51 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 	}
 }
 
-func (p *hubPublisher) watchDisconnect(conn net.Conn) {
-	_, _ = io.Copy(io.Discard, conn)
-	p.removeConn(conn, "")
+func (p *hubPublisher) writerLoop(sub *hubSubscriber) {
+	for {
+		select {
+		case <-sub.stop:
+			return
+		case payload := <-sub.send:
+			// Writes must not block the DVR reader loop; slow subscribers are dropped.
+			_ = sub.conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+			if _, err := sub.conn.Write(payload); err != nil {
+				p.removeConn(sub.conn, "subscriber_write_error")
+				return
+			}
+		}
+	}
+}
+
+func (p *hubPublisher) watchDisconnect(sub *hubSubscriber) {
+	_, _ = io.Copy(io.Discard, sub.conn)
+	p.removeConn(sub.conn, "")
+}
+
+func (p *hubPublisher) enqueue(sub *hubSubscriber, payload []byte) bool {
+	select {
+	case <-sub.stop:
+		return false
+	default:
+	}
+	select {
+	case sub.send <- payload:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *hubPublisher) removeConn(conn net.Conn, dropReason string) {
-	_ = conn.Close()
 	p.mu.Lock()
-	if _, ok := p.conns[conn]; !ok {
+	sub, ok := p.conns[conn]
+	if !ok {
 		p.mu.Unlock()
 		return
 	}
 	delete(p.conns, conn)
 	p.mu.Unlock()
+	sub.close()
 	if p.m != nil {
 		p.m.addSubscriber(p.ch.proto, -1)
 		if dropReason != "" {
@@ -599,23 +655,24 @@ func (p *hubPublisher) removeConn(conn net.Conn, dropReason string) {
 	}
 }
 
-func (p *hubPublisher) publish(payload []byte, keyframe bool) {
+func (p *hubPublisher) publish(payload []byte, keyframeStart bool, appendBoot bool) {
 	p.mu.Lock()
-	if keyframe {
+	if keyframeStart {
 		p.boot = append(p.boot[:0], payload...)
+	} else if appendBoot && len(p.boot) > 0 {
+		p.boot = append(p.boot, payload...)
 	}
-	conns := make([]net.Conn, 0, len(p.conns))
-	for conn := range p.conns {
-		conns = append(conns, conn)
+	subs := make([]*hubSubscriber, 0, len(p.conns))
+	for _, sub := range p.conns {
+		subs = append(subs, sub)
 	}
 	p.mu.Unlock()
 
+	frameCopy := append([]byte(nil), payload...)
 	var dead []net.Conn
-	for _, conn := range conns {
-		_ = conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
-		if _, err := conn.Write(payload); err != nil {
-			_ = conn.Close()
-			dead = append(dead, conn)
+	for _, sub := range subs {
+		if !p.enqueue(sub, frameCopy) {
+			dead = append(dead, sub.conn)
 		}
 	}
 
@@ -655,7 +712,7 @@ func (c *client) makeHubPublishers(ctx context.Context, mappings []hubChannel) (
 		p := &hubPublisher{
 			ch:    m,
 			ln:    ln,
-			conns: make(map[net.Conn]struct{}),
+			conns: make(map[net.Conn]*hubSubscriber),
 			m:     c.metrics,
 		}
 		out[m.proto] = p
@@ -1182,18 +1239,23 @@ func (c *client) streamMedia(ctx context.Context, out io.Writer) error {
 	pending := make([]byte, 0, 256*1024)
 	tmp := make([]byte, 64*1024)
 	protoCh := uint32(c.protocolChannel())
+	lastParsedFrameAt := time.Now()
 
 	for {
-		if err := c.dataConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		if err := c.dataConn.SetReadDeadline(time.Now().Add(mediaReadTimeout)); err != nil {
 			return err
 		}
 		n, err := c.dataReader.Read(tmp)
 		if n > 0 {
 			pending = append(pending, tmp[:n]...)
 			var consumed int
-			consumed, state, err = c.processMediaFrames(pending, out, &frameBuffer, state, protoCh)
+			var parsedFrame bool
+			consumed, state, parsedFrame, err = c.processMediaFrames(pending, out, &frameBuffer, state, protoCh)
 			if err != nil {
 				return err
+			}
+			if parsedFrame {
+				lastParsedFrameAt = time.Now()
 			}
 			if consumed > 0 {
 				pending = append(pending[:0], pending[consumed:]...)
@@ -1202,6 +1264,10 @@ func (c *client) streamMedia(ctx context.Context, out io.Writer) error {
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
+				if time.Since(lastParsedFrameAt) >= mediaStallAfter {
+					c.metrics.addDrop("single_media_stalled")
+					return fmt.Errorf("single media stalled for %s", time.Since(lastParsedFrameAt).Round(time.Second))
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -1219,17 +1285,22 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 	tmp := make([]byte, 64*1024)
 	synced := make(map[uint32]bool, len(pubs))
 	openFrame := make(map[uint32]bool, len(pubs))
+	bootCollect := make(map[uint32]bool, len(pubs))
+	lastParsedFrameAt := time.Now()
 
 	for {
-		if err := c.dataConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		if err := c.dataConn.SetReadDeadline(time.Now().Add(mediaReadTimeout)); err != nil {
 			return err
 		}
 		n, err := c.dataReader.Read(tmp)
 		if n > 0 {
 			pending = append(pending, tmp[:n]...)
-			consumed, procErr := c.processHubMediaFrames(pending, pubs, synced, openFrame)
+			consumed, parsedFrame, procErr := c.processHubMediaFrames(pending, pubs, synced, openFrame, bootCollect)
 			if procErr != nil {
 				return procErr
+			}
+			if parsedFrame {
+				lastParsedFrameAt = time.Now()
 			}
 			if consumed > 0 {
 				pending = append(pending[:0], pending[consumed:]...)
@@ -1238,6 +1309,10 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
+				if time.Since(lastParsedFrameAt) >= mediaStallAfter {
+					c.metrics.addDrop("hub_media_stalled")
+					return fmt.Errorf("hub media stalled for %s", time.Since(lastParsedFrameAt).Round(time.Second))
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -1250,16 +1325,17 @@ func (c *client) streamHubMedia(ctx context.Context, pubs map[uint32]*hubPublish
 	}
 }
 
-func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPublisher, synced map[uint32]bool, openFrame map[uint32]bool) (int, error) {
+func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPublisher, synced map[uint32]bool, openFrame map[uint32]bool, bootCollect map[uint32]bool) (int, bool, error) {
 	i := 0
+	parsedFrame := false
 	for i+mediaHeaderLen <= len(pending) {
 		if !bytes.Equal(pending[i:i+4], magic) {
 			j := bytes.Index(pending[i+1:], magic)
 			if j < 0 {
 				if len(pending) > 3 {
-					return len(pending) - 3, nil
+					return len(pending) - 3, parsedFrame, nil
 				}
-				return 0, nil
+				return 0, parsedFrame, nil
 			}
 			i += j + 1
 			continue
@@ -1276,51 +1352,69 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 		frameBytes := pending[i : i+frameLen]
 		cmd := be32le(frameBytes[4:8])
 		frameType := be32le(frameBytes[8:12])
+		flag := be32le(frameBytes[12:16])
+		session := be32le(frameBytes[16:20])
+		seqID := be32le(frameBytes[20:24])
 		payload := frameBytes[mediaHeaderLen:]
+		parsedFrame = true
+		c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "recv")
 
-		// ACK every media packet to keep DVR synchronized.
-		_ = c.writeData(buildFrame(cmd, 2, mediaAckFlag, mediaAckSession, 0, nil))
+		c.maybeAckMedia(cmd)
 
 		pub, ok := pubs[cmd]
 		if !ok {
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_other_channel")
 			i += frameLen
 			continue
 		}
 		if c.cfg.strictFrameType {
 			if frameType != 0 && frameType != 1 && frameType != 2 && frameType != 800 {
 				c.metrics.addDrop("hub_invalid_frame_type")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_invalid_frame_type")
 				i += frameLen
 				continue
 			}
 		}
 		if payloadLen == 0 {
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "keepalive_or_empty")
 			i += frameLen
 			continue
 		}
 		if frameType == 2 {
 			if !c.cfg.includeSeq2 {
 				c.metrics.addDrop("hub_ignore_type2")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_type2")
 				i += frameLen
 				continue
 			}
-			if !synced[cmd] || !openFrame[cmd] {
+			if !synced[cmd] {
 				c.metrics.addDrop("hub_wait_sync_cont")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync_cont")
+				i += frameLen
+				continue
+			}
+			if !openFrame[cmd] {
+				c.metrics.addDrop("hub_drop_cont_without_start")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_cont_without_start")
 				i += frameLen
 				continue
 			}
 			chunk := c.continuationChunk(payload)
 			if len(chunk) == 0 {
 				c.metrics.addDrop("hub_empty_cont")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_empty_cont")
 				i += frameLen
 				continue
 			}
 			c.metrics.addFrame(cmd, len(chunk))
-			pub.publish(chunk, false)
+			pub.publish(chunk, false, bootCollect[cmd])
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_cont")
 			i += frameLen
 			continue
 		}
 		if frameType != 0 && frameType != 1 {
 			c.metrics.addDrop("hub_non_video_frame_type")
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_non_video_frame_type")
 			i += frameLen
 			continue
 		}
@@ -1328,18 +1422,21 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 		start := startcodeOffset(payload)
 		if start < 0 || start >= len(payload) {
 			c.metrics.addDrop("hub_no_startcode")
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_no_startcode")
 			i += frameLen
 			continue
 		}
 		chunk := payload[start:]
 		if len(chunk) == 0 {
 			c.metrics.addDrop("hub_empty_chunk")
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_empty_chunk")
 			i += frameLen
 			continue
 		}
 		if !synced[cmd] {
 			if frameType != 0 || !isKeyframeOrConfig(chunk) {
 				c.metrics.addDrop("hub_wait_sync")
+				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync")
 				i += frameLen
 				continue
 			}
@@ -1350,11 +1447,25 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 			}
 		}
 		c.metrics.addFrame(cmd, len(chunk))
-		pub.publish(chunk, frameType == 0)
+		keyStart := frameType == 0 && isKeyframeOrConfig(chunk)
+		if keyStart {
+			bootCollect[cmd] = true
+			pub.publish(chunk, true, false)
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start")
+		} else if frameType == 0 {
+			// frame_type=0 is not always a decodable keyframe start; avoid poisoning subscriber bootstrap.
+			bootCollect[cmd] = false
+			pub.publish(chunk, false, false)
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start_nonkey")
+		} else {
+			bootCollect[cmd] = false
+			pub.publish(chunk, false, false)
+			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start")
+		}
 		openFrame[cmd] = true
 		i += frameLen
 	}
-	return i, nil
+	return i, parsedFrame, nil
 }
 
 // #region agent log
@@ -1362,17 +1473,18 @@ var mediaPacketCount int
 
 // #endregion
 
-func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *[][]byte, state streamState, protoCh uint32) (int, streamState, error) {
+func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *[][]byte, state streamState, protoCh uint32) (int, streamState, bool, error) {
 	_ = frameBuffer
 	i := 0
+	parsedFrame := false
 	for i+mediaHeaderLen <= len(pending) {
 		if !bytes.Equal(pending[i:i+4], magic) {
 			j := bytes.Index(pending[i+1:], magic)
 			if j < 0 {
 				if len(pending) > 3 {
-					return len(pending) - 3, state, nil
+					return len(pending) - 3, state, parsedFrame, nil
 				}
-				return 0, state, nil
+				return 0, state, parsedFrame, nil
 			}
 			i += j + 1
 			continue
@@ -1397,6 +1509,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		session := be32le(frameBytes[16:20])
 		seqID := be32le(frameBytes[20:24])
 		payload := frameBytes[mediaHeaderLen:]
+		parsedFrame = true
 
 		// #region agent log
 		mediaPacketCount++
@@ -1418,8 +1531,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		}
 		// #endregion
 
-		// ACK each media packet (seq=2, flag=2) as observed in client->server captures.
-		_ = c.writeData(buildFrame(cmd, 2, mediaAckFlag, mediaAckSession, 0, nil))
+		c.maybeAckMedia(cmd)
 		c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "recv")
 
 		if c.cfg.strictFrameType {
@@ -1472,7 +1584,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 			}
 			if len(toOut) > 0 {
 				if _, err := out.Write(toOut); err != nil {
-					return i, state, err
+					return i, state, parsedFrame, err
 				}
 				c.metrics.addFrame(cmd, len(toOut))
 				c.metrics.addSync(cmd)
@@ -1500,7 +1612,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 					continue
 				}
 				if _, err := out.Write(toOut); err != nil {
-					return i, state, err
+					return i, state, parsedFrame, err
 				}
 				c.metrics.addFrame(cmd, len(toOut))
 				c.haveOpenFrame = true
@@ -1523,7 +1635,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 					break
 				}
 				if _, err := out.Write(toOut); err != nil {
-					return i, state, err
+					return i, state, parsedFrame, err
 				}
 				c.metrics.addFrame(cmd, len(toOut))
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_cont")
@@ -1536,12 +1648,12 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		}
 		i += frameLen
 	}
-	return i, state, nil
+	return i, state, parsedFrame, nil
 }
 
 func (c *client) writeCmd(buf []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
 	if c.cmdConn == nil {
 		return net.ErrClosed
 	}
@@ -1558,14 +1670,36 @@ func (c *client) writeCmd(buf []byte) error {
 
 // writeData sends a frame on media connection (e.g. ACK seq=2). Required to keep DVR synchronized.
 func (c *client) writeData(buf []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.writeDataWithDeadline(buf, 3*time.Second)
+}
+
+func (c *client) writeDataWithDeadline(buf []byte, timeout time.Duration) error {
+	c.dataMu.Lock()
+	defer c.dataMu.Unlock()
 	if c.dataConn == nil {
 		return net.ErrClosed
 	}
-	_ = c.dataConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	_ = c.dataConn.SetWriteDeadline(time.Now().Add(timeout))
 	_, err := c.dataConn.Write(buf)
 	return err
+}
+
+func (c *client) maybeAckMedia(cmd uint32) {
+	now := time.Now()
+
+	c.ackMu.Lock()
+	if c.lastMediaAck == nil {
+		c.lastMediaAck = make(map[uint32]time.Time)
+	}
+	last := c.lastMediaAck[cmd]
+	if !last.IsZero() && now.Sub(last) < mediaAckEvery {
+		c.ackMu.Unlock()
+		return
+	}
+	c.lastMediaAck[cmd] = now
+	c.ackMu.Unlock()
+
+	_ = c.writeDataWithDeadline(buildFrame(cmd, 2, mediaAckFlag, mediaAckSession, 0, nil), mediaAckTimeout)
 }
 
 func buildFrame(cmd, seq, flag, session, extra uint32, payload []byte) []byte {
@@ -1873,6 +2007,18 @@ func (c *client) continuationChunk(payload []byte) []byte {
 		}
 		chunk = chunk[c.cfg.continuationSkip:]
 	}
+	// Some legacy DVR packets carry all-zero type=2 payloads (non-video metadata/heartbeat).
+	// Forwarding them can poison new-subscriber bootstrap and cause long "loading" states.
+	allZero := true
+	for _, b := range chunk {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return nil
+	}
 	return chunk
 }
 
@@ -1897,10 +2043,25 @@ func firstNALType(annexB []byte) int {
 	return int(annexB[off] & 0x1F)
 }
 
-// isKeyframeOrConfig: true when first NAL is SPS(7), PPS(8), or IDR(5). Used to avoid starting from a P-frame.
+// isKeyframeOrConfig: true when Annex-B data contains SPS(7), PPS(8), or IDR(5).
+// This scans multiple NALs because some DVR packets start with AUD/SEI before SPS/IDR.
 func isKeyframeOrConfig(annexB []byte) bool {
-	t := firstNALType(annexB)
-	return t == 5 || t == 7 || t == 8
+	for i := 0; i < len(annexB)-4; i++ {
+		if i+5 <= len(annexB) && annexB[i] == 0 && annexB[i+1] == 0 && annexB[i+2] == 0 && annexB[i+3] == 1 {
+			t := annexB[i+4] & 0x1F
+			if t == 5 || t == 7 || t == 8 {
+				return true
+			}
+			continue
+		}
+		if i+4 <= len(annexB) && annexB[i] == 0 && annexB[i+1] == 0 && annexB[i+2] == 1 {
+			t := annexB[i+3] & 0x1F
+			if t == 5 || t == 7 || t == 8 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // avccToAnnexB converts AVCC payload ([4-byte length][NAL]...) to Annex-B.
