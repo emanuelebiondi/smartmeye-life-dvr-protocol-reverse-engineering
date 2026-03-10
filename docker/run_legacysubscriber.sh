@@ -8,7 +8,7 @@ port="$((base + channel))"
 
 set -- /usr/local/bin/legacybridge \
   --subscribe "${bind}:${port}" \
-  --reconnect "${DVR_RECONNECT:-3s}"
+  --reconnect "${DVR_SUB_RECONNECT:-500ms}"
 
 if [ "${DVR_VERBOSE:-0}" = "1" ]; then
   set -- "$@" --verbose

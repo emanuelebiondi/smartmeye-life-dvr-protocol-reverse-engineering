@@ -1,5 +1,7 @@
 streams:
   # Active profiles (hub subscriber, single DVR session via legacyhub)
+  # Stability-first default: preload is disabled.
+  # If your DVR behaves well, you can enable preload per channel by appending #preload.
   # DVR supports up to 8 channels; enable only physically used channels.
   dvr_cam1:
     - exec:/usr/local/bin/run_legacysubscriber 1
