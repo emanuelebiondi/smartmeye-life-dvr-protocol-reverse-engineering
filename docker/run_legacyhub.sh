@@ -16,8 +16,20 @@ set -- /usr/local/bin/legacybridge \
   --hub-channels "${DVR_HUB_CHANNELS:-1,2,3,4,5}" \
   --hub-protocol-offset "${DVR_PROTOCOL_OFFSET:--1}"
 
+if [ -n "${DVR_CHANNEL_MAP:-}" ]; then
+  set -- "$@" --channel-map "${DVR_CHANNEL_MAP}"
+fi
+
+if [ -n "${DVR_METRICS_ADDR:-}" ]; then
+  set -- "$@" --metrics-addr "${DVR_METRICS_ADDR}"
+fi
+
 if [ "${DVR_VERBOSE:-0}" = "1" ]; then
   set -- "$@" --verbose
+fi
+
+if [ "${DVR_LOG_JSON:-0}" = "1" ]; then
+  set -- "$@" --log-json
 fi
 
 exec "$@"

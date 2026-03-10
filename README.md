@@ -56,6 +56,8 @@ Channel count note:
 - the DVR protocol/device supports up to 8 channels;
 - in this deployment only channels 1..5 are enabled by default;
 - to enable more, update `DVR_HUB_CHANNELS` and uncomment `dvr_cam6..dvr_cam8` in `go2rtc.yaml`.
+- optional explicit mapping is available with `DVR_CHANNEL_MAP` (example: `1:0,2:1,3:2,4:3,5:4`).
+- when `DVR_CHANNEL_MAP` is set, it takes priority over `DVR_PROTOCOL_OFFSET`.
 
 ## Project structure
 
@@ -122,6 +124,10 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
 - 2026-03-10
   - Added: single-session hub architecture (`legacyhub`) with local subscriber mode.
   - Added: `--hub` and `--subscribe` runtime modes in `legacybridge`.
+  - Added: optional `--channel-map` for explicit user->protocol channel mapping.
+  - Added: optional Prometheus metrics endpoint (`--metrics-addr`).
+  - Added: optional JSON runtime logs (`--log-json`).
+  - Added: parser/config unit tests in `legacybridge/main_test.go`.
   - Changed: Docker stack now runs `legacyhub` + `go2rtc`.
   - Changed: active go2rtc profiles simplified to `dvr_cam1..5` (hub subscriber mode).
   - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.

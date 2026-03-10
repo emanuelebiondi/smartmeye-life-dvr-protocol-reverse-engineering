@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -81,6 +83,10 @@ type config struct {
 	hubPortBase      int
 	hubProtoOffset   int
 	subscribeAddr    string
+	channelMapSpec   string
+	channelMap       map[int]int
+	metricsAddr      string
+	logJSON          bool
 }
 
 type frame struct {
@@ -95,6 +101,7 @@ type frame struct {
 type client struct {
 	cfg                 config
 	logger              *log.Logger
+	metrics             *bridgeMetrics
 	cmdConn             net.Conn
 	dataConn            net.Conn
 	dataReader          *bufio.Reader
@@ -119,6 +126,43 @@ type hubPublisher struct {
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 	boot  []byte
+	m     *bridgeMetrics
+}
+
+type bridgeMetrics struct {
+	started       time.Time
+	mu            sync.Mutex
+	mode          string
+	reconnects    uint64
+	dropsByReason map[string]uint64
+	framesByProto map[uint32]uint64
+	bytesByProto  map[uint32]uint64
+	syncByProto   map[uint32]uint64
+	subsByProto   map[uint32]int
+}
+
+type jsonLogWriter struct {
+	out io.Writer
+}
+
+func (w jsonLogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if msg == "" {
+		return len(p), nil
+	}
+	line, _ := json.Marshal(map[string]interface{}{
+		"ts":   time.Now().Format(time.RFC3339Nano),
+		"lvl":  "info",
+		"msg":  msg,
+		"src":  "legacybridge",
+		"type": "runtime",
+	})
+	line = append(line, '\n')
+	_, err := w.out.Write(line)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func main() {
@@ -127,7 +171,20 @@ func main() {
 	if cfg.verbose {
 		loggerOut = os.Stderr
 	}
+	if cfg.logJSON && cfg.verbose {
+		loggerOut = jsonLogWriter{out: os.Stderr}
+	}
 	logger := log.New(loggerOut, "legacybridge: ", log.LstdFlags)
+	if cfg.logJSON {
+		logger = log.New(loggerOut, "", 0)
+	}
+
+	chMap, err := parseChannelMap(cfg.channelMapSpec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	cfg.channelMap = chMap
 
 	if cfg.dumpFile != "" {
 		if err := extractDump(cfg.dumpFile, os.Stdout); err != nil {
@@ -140,9 +197,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cl := &client{cfg: cfg, logger: logger}
+	mode := "single"
+	if cfg.hubMode {
+		mode = "hub"
+	}
 	if cfg.subscribeAddr != "" {
-		if err := runSubscribe(ctx, cfg.subscribeAddr, os.Stdout, cfg.reconnect, logger, cfg.verbose); err != nil && !errors.Is(err, context.Canceled) {
+		mode = "subscribe"
+	}
+	m := newBridgeMetrics(mode)
+	_ = startMetricsServer(ctx, cfg.metricsAddr, m, logger, cfg.verbose)
+
+	cl := &client{cfg: cfg, logger: logger, metrics: m}
+	if cfg.subscribeAddr != "" {
+		if err := runSubscribe(ctx, cfg.subscribeAddr, os.Stdout, cfg.reconnect, logger, cfg.verbose, m); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -191,11 +258,187 @@ func parseFlags() config {
 	flag.IntVar(&cfg.hubPortBase, "hub-port-base", 9100, "Hub output base port; channel N is published on base+N")
 	flag.IntVar(&cfg.hubProtoOffset, "hub-protocol-offset", -1, "Protocol channel = user channel + offset (default -1)")
 	flag.StringVar(&cfg.subscribeAddr, "subscribe", "", "Subscribe mode: tcp address from hub, e.g. 127.0.0.1:9101")
+	flag.StringVar(&cfg.channelMapSpec, "channel-map", "", "Optional per-channel map user:proto (e.g. 1:0,2:1,3:4)")
+	flag.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Optional Prometheus metrics listen addr (e.g. 127.0.0.1:9910)")
+	flag.BoolVar(&cfg.logJSON, "log-json", false, "Emit runtime logs as JSON lines (stderr)")
 	flag.Parse()
 	return cfg
 }
 
-func parseHubMappings(chSpec string, protoOffset, portBase int) ([]hubChannel, error) {
+func parseChannelMap(spec string) (map[int]int, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	out := make(map[int]int)
+	usedProto := make(map[int]struct{})
+	for _, tok := range strings.Split(spec, ",") {
+		p := strings.TrimSpace(tok)
+		if p == "" {
+			continue
+		}
+		parts := strings.Split(p, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid channel-map token %q (expected user:proto)", p)
+		}
+		userCh, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid user channel in %q: %w", p, err)
+		}
+		protoCh, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid protocol channel in %q: %w", p, err)
+		}
+		if userCh <= 0 {
+			return nil, fmt.Errorf("user channel must be >=1 in %q", p)
+		}
+		if protoCh < 0 || protoCh > 7 {
+			return nil, fmt.Errorf("protocol channel out of range in %q", p)
+		}
+		if _, ok := out[userCh]; ok {
+			return nil, fmt.Errorf("duplicate user channel %d in channel-map", userCh)
+		}
+		if _, ok := usedProto[protoCh]; ok {
+			return nil, fmt.Errorf("duplicate protocol channel %d in channel-map", protoCh)
+		}
+		out[userCh] = protoCh
+		usedProto[protoCh] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func newBridgeMetrics(mode string) *bridgeMetrics {
+	return &bridgeMetrics{
+		started:       time.Now(),
+		mode:          mode,
+		dropsByReason: make(map[string]uint64),
+		framesByProto: make(map[uint32]uint64),
+		bytesByProto:  make(map[uint32]uint64),
+		syncByProto:   make(map[uint32]uint64),
+		subsByProto:   make(map[uint32]int),
+	}
+}
+
+func (m *bridgeMetrics) incReconnect() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.reconnects++
+	m.mu.Unlock()
+}
+
+func (m *bridgeMetrics) addDrop(reason string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.dropsByReason[reason]++
+	m.mu.Unlock()
+}
+
+func (m *bridgeMetrics) addFrame(proto uint32, bytes int) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.framesByProto[proto]++
+	m.bytesByProto[proto] += uint64(bytes)
+	m.mu.Unlock()
+}
+
+func (m *bridgeMetrics) addSync(proto uint32) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.syncByProto[proto]++
+	m.mu.Unlock()
+}
+
+func (m *bridgeMetrics) addSubscriber(proto uint32, delta int) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.subsByProto[proto] += delta
+	if m.subsByProto[proto] < 0 {
+		m.subsByProto[proto] = 0
+	}
+	m.mu.Unlock()
+}
+
+func (m *bridgeMetrics) writeProm(w io.Writer) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, _ = fmt.Fprintf(w, "# TYPE legacybridge_uptime_seconds gauge\nlegacybridge_uptime_seconds %.0f\n", time.Since(m.started).Seconds())
+	_, _ = fmt.Fprintf(w, "# TYPE legacybridge_mode gauge\nlegacybridge_mode{mode=%q} 1\n", m.mode)
+	_, _ = fmt.Fprintf(w, "# TYPE legacybridge_reconnect_total counter\nlegacybridge_reconnect_total %d\n", m.reconnects)
+
+	_, _ = fmt.Fprintln(w, "# TYPE legacybridge_media_frames_total counter")
+	for ch, v := range m.framesByProto {
+		_, _ = fmt.Fprintf(w, "legacybridge_media_frames_total{proto_channel=%q} %d\n", strconv.Itoa(int(ch)), v)
+	}
+
+	_, _ = fmt.Fprintln(w, "# TYPE legacybridge_media_bytes_total counter")
+	for ch, v := range m.bytesByProto {
+		_, _ = fmt.Fprintf(w, "legacybridge_media_bytes_total{proto_channel=%q} %d\n", strconv.Itoa(int(ch)), v)
+	}
+
+	_, _ = fmt.Fprintln(w, "# TYPE legacybridge_sync_total counter")
+	for ch, v := range m.syncByProto {
+		_, _ = fmt.Fprintf(w, "legacybridge_sync_total{proto_channel=%q} %d\n", strconv.Itoa(int(ch)), v)
+	}
+
+	_, _ = fmt.Fprintln(w, "# TYPE legacybridge_subscribers gauge")
+	for ch, v := range m.subsByProto {
+		_, _ = fmt.Fprintf(w, "legacybridge_subscribers{proto_channel=%q} %d\n", strconv.Itoa(int(ch)), v)
+	}
+
+	_, _ = fmt.Fprintln(w, "# TYPE legacybridge_drop_total counter")
+	for reason, v := range m.dropsByReason {
+		_, _ = fmt.Fprintf(w, "legacybridge_drop_total{reason=%q} %d\n", reason, v)
+	}
+}
+
+func startMetricsServer(ctx context.Context, addr string, m *bridgeMetrics, logger *log.Logger, verbose bool) *http.Server {
+	if strings.TrimSpace(addr) == "" || m == nil {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		m.writeProm(w)
+	})
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+	go func() {
+		if verbose {
+			logger.Printf("metrics server listening on http://%s/metrics", addr)
+		}
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && verbose {
+			logger.Printf("metrics server error: %v", err)
+		}
+	}()
+	return srv
+}
+
+func parseHubMappings(chSpec string, protoOffset, portBase int, chMap map[int]int) ([]hubChannel, error) {
 	raw := strings.Split(chSpec, ",")
 	seenUser := make(map[int]struct{})
 	seenProto := make(map[int]struct{})
@@ -217,6 +460,11 @@ func parseHubMappings(chSpec string, protoOffset, portBase int) ([]hubChannel, e
 			continue
 		}
 		protoCh := userCh + protoOffset
+		if chMap != nil {
+			if mapped, ok := chMap[userCh]; ok {
+				protoCh = mapped
+			}
+		}
 		if protoCh < 0 || protoCh > 7 {
 			return nil, fmt.Errorf("hub channel %d maps to invalid protocol channel %d", userCh, protoCh)
 		}
@@ -238,11 +486,15 @@ func parseHubMappings(chSpec string, protoOffset, portBase int) ([]hubChannel, e
 	return mappings, nil
 }
 
-func runSubscribe(ctx context.Context, addr string, out io.Writer, reconnect time.Duration, logger *log.Logger, verbose bool) error {
+func runSubscribe(ctx context.Context, addr string, out io.Writer, reconnect time.Duration, logger *log.Logger, verbose bool, m *bridgeMetrics) error {
 	dialer := net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
 	for {
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
+			if m != nil {
+				m.incReconnect()
+				m.addDrop("subscribe_connect_error")
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -257,6 +509,10 @@ func runSubscribe(ctx context.Context, addr string, out io.Writer, reconnect tim
 		_ = conn.Close()
 		if copyErr == nil {
 			continue
+		}
+		if m != nil {
+			m.incReconnect()
+			m.addDrop("subscribe_copy_error")
 		}
 		if isBrokenPipe(copyErr) {
 			return nil
@@ -303,6 +559,9 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 		p.conns[conn] = struct{}{}
 		boot := append([]byte(nil), p.boot...)
 		p.mu.Unlock()
+		if p.m != nil {
+			p.m.addSubscriber(p.ch.proto, 1)
+		}
 		if len(boot) > 0 {
 			_ = conn.SetWriteDeadline(time.Now().Add(1200 * time.Millisecond))
 			if _, err := conn.Write(boot); err != nil {
@@ -310,6 +569,10 @@ func (p *hubPublisher) acceptLoop(ctx context.Context, logger *log.Logger, verbo
 				p.mu.Lock()
 				delete(p.conns, conn)
 				p.mu.Unlock()
+				if p.m != nil {
+					p.m.addSubscriber(p.ch.proto, -1)
+					p.m.addDrop("subscriber_bootstrap_write_error")
+				}
 				continue
 			}
 		}
@@ -330,6 +593,10 @@ func (p *hubPublisher) publish(payload []byte, keyframe bool) {
 		if _, err := conn.Write(payload); err != nil {
 			_ = conn.Close()
 			delete(p.conns, conn)
+			if p.m != nil {
+				p.m.addSubscriber(p.ch.proto, -1)
+				p.m.addDrop("subscriber_write_error")
+			}
 		}
 	}
 }
@@ -341,6 +608,9 @@ func (p *hubPublisher) close() {
 	for conn := range p.conns {
 		_ = conn.Close()
 		delete(p.conns, conn)
+		if p.m != nil {
+			p.m.addSubscriber(p.ch.proto, -1)
+		}
 	}
 }
 
@@ -359,6 +629,7 @@ func (c *client) makeHubPublishers(ctx context.Context, mappings []hubChannel) (
 			ch:    m,
 			ln:    ln,
 			conns: make(map[net.Conn]struct{}),
+			m:     c.metrics,
 		}
 		out[m.proto] = p
 		go p.acceptLoop(ctx, c.logger, c.cfg.verbose)
@@ -376,7 +647,7 @@ func (c *client) closeHubPublishers(pubs map[uint32]*hubPublisher) {
 }
 
 func (c *client) runHub(ctx context.Context) error {
-	mappings, err := parseHubMappings(c.cfg.hubChannels, c.cfg.hubProtoOffset, c.cfg.hubPortBase)
+	mappings, err := parseHubMappings(c.cfg.hubChannels, c.cfg.hubProtoOffset, c.cfg.hubPortBase, c.cfg.channelMap)
 	if err != nil {
 		return err
 	}
@@ -395,6 +666,7 @@ func (c *client) runHub(ctx context.Context) error {
 		if err == nil || errors.Is(err, context.Canceled) {
 			return err
 		}
+		c.metrics.incReconnect()
 		if c.cfg.verbose {
 			c.logger.Printf("hub session ended: %v", err)
 		}
@@ -483,6 +755,7 @@ func (c *client) run(ctx context.Context, out io.Writer) error {
 		if isBrokenPipe(err) {
 			return nil
 		}
+		c.metrics.incReconnect()
 		if c.cfg.verbose {
 			c.logger.Printf("stream ended: %v", err)
 		}
@@ -634,6 +907,11 @@ func (c *client) writeDiagMedia(cmd, frameType, flag, session, seqid uint32, pay
 func (c *client) protocolChannel() int {
 	if c.cfg.protocolChannel >= 0 {
 		return c.cfg.protocolChannel
+	}
+	if c.cfg.channelMap != nil {
+		if mapped, ok := c.cfg.channelMap[c.cfg.channel]; ok {
+			return mapped
+		}
 	}
 	return c.cfg.channel - c.cfg.channelBase
 }
@@ -978,6 +1256,7 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 		}
 		if c.cfg.strictFrameType {
 			if frameType != 0 && frameType != 1 && frameType != 2 && frameType != 800 {
+				c.metrics.addDrop("hub_invalid_frame_type")
 				i += frameLen
 				continue
 			}
@@ -987,30 +1266,36 @@ func (c *client) processHubMediaFrames(pending []byte, pubs map[uint32]*hubPubli
 			continue
 		}
 		if frameType != 0 && frameType != 1 {
+			c.metrics.addDrop("hub_non_video_frame_type")
 			i += frameLen
 			continue
 		}
 
 		start := startcodeOffset(payload)
 		if start < 0 || start >= len(payload) {
+			c.metrics.addDrop("hub_no_startcode")
 			i += frameLen
 			continue
 		}
 		chunk := payload[start:]
 		if len(chunk) == 0 {
+			c.metrics.addDrop("hub_empty_chunk")
 			i += frameLen
 			continue
 		}
 		if !synced[cmd] {
 			if frameType != 0 || !isKeyframeOrConfig(chunk) {
+				c.metrics.addDrop("hub_wait_sync")
 				i += frameLen
 				continue
 			}
 			synced[cmd] = true
+			c.metrics.addSync(cmd)
 			if c.cfg.verbose {
 				c.logger.Printf("hub sync acquired user_ch=%d proto_ch=%d", pub.ch.user, pub.ch.proto)
 			}
 		}
+		c.metrics.addFrame(cmd, len(chunk))
 		pub.publish(chunk, frameType == 0)
 		i += frameLen
 	}
@@ -1085,6 +1370,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 		if c.cfg.strictFrameType {
 			if frameType != 0 && frameType != 1 && frameType != 2 && frameType != 800 {
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_invalid_frame_type")
+				c.metrics.addDrop("single_invalid_frame_type")
 				i += frameLen
 				continue
 			}
@@ -1092,6 +1378,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 
 		if cmd != protoCh {
 			c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_other_channel")
+			c.metrics.addDrop("single_other_channel")
 			i += frameLen
 			continue
 		}
@@ -1107,18 +1394,21 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 			// In DLL decoder logic, initial sync happens on frame_type=0 (I-frame/config start).
 			if frameType != 0 {
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync_type0")
+				c.metrics.addDrop("single_wait_sync_type0")
 				i += frameLen
 				continue
 			}
 			start := startcodeOffset(payload)
 			if start < 0 || start >= len(payload) {
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync_no_startcode")
+				c.metrics.addDrop("single_wait_sync_no_startcode")
 				i += frameLen
 				continue
 			}
 			toOut := payload[start:]
 			if !isKeyframeOrConfig(toOut) {
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "wait_sync_not_keyframe")
+				c.metrics.addDrop("single_wait_sync_not_keyframe")
 				i += frameLen
 				continue
 			}
@@ -1129,6 +1419,8 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 				if _, err := out.Write(toOut); err != nil {
 					return i, state, err
 				}
+				c.metrics.addFrame(cmd, len(toOut))
+				c.metrics.addSync(cmd)
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_sync")
 			}
 			c.haveOpenFrame = true
@@ -1141,18 +1433,21 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 				start := startcodeOffset(payload)
 				if start < 0 || start >= len(payload) {
 					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_start_no_startcode")
+					c.metrics.addDrop("single_drop_start_no_startcode")
 					i += frameLen
 					continue
 				}
 				toOut := payload[start:]
 				if len(toOut) == 0 {
 					c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_empty_start")
+					c.metrics.addDrop("single_drop_empty_start")
 					i += frameLen
 					continue
 				}
 				if _, err := out.Write(toOut); err != nil {
 					return i, state, err
 				}
+				c.metrics.addFrame(cmd, len(toOut))
 				c.haveOpenFrame = true
 				c.lastWasIDRStart = frameType == 0
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "write_start")
@@ -1163,6 +1458,7 @@ func (c *client) processMediaFrames(pending []byte, out io.Writer, frameBuffer *
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "ignore_socket_id")
 			default:
 				c.writeDiagMedia(cmd, frameType, flag, session, seqID, payload, "drop_unknown")
+				c.metrics.addDrop("single_drop_unknown")
 			}
 		}
 		i += frameLen

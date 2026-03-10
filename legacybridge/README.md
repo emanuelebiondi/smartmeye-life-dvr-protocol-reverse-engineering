@@ -49,7 +49,10 @@ ffplay camera1.h264
 - `--keepalive` keepalive interval (default `1s`)
 - `--reconnect` reconnect delay (default `3s`)
 - `--verbose` verbose stderr logging
+- `--log-json` JSON-line logs on stderr
 - `--diag-file` media diagnostics output
+- `--channel-map` explicit user:proto mapping (e.g. `1:0,2:1,3:2`)
+- `--metrics-addr` expose Prometheus metrics endpoint (e.g. `127.0.0.1:9910`)
 
 ## Channel mapping
 
@@ -63,7 +66,14 @@ Common mapping observed:
 Equivalent formula:
 - `protocol-channel = channel - 1` (with `--channel-base 1`)
 
-If your firmware uses a different mapping, set `--protocol-channel` explicitly.
+If your firmware uses a different mapping:
+- use `--protocol-channel` for one-off/manual overrides;
+- use `--channel-map` for persistent per-channel mapping (e.g. `1:0,2:1,3:2,4:3,5:4`).
+
+Priority:
+- explicit `--protocol-channel` has highest priority;
+- then `--channel-map`;
+- otherwise base/offset mapping is used.
 
 ## go2rtc integration
 

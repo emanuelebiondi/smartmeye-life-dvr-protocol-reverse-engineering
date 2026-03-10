@@ -21,15 +21,28 @@ set -- /usr/local/bin/legacybridge \
   --reconnect "${DVR_RECONNECT:-3s}" \
   --user "${DVR_USER}" \
   --pass "${DVR_PASSWORD}" \
-  --channel "${channel}" \
-  --protocol-channel "${proto}"
+  --channel "${channel}"
+
+if [ -n "${DVR_CHANNEL_MAP:-}" ]; then
+  set -- "$@" --channel-map "${DVR_CHANNEL_MAP}"
+else
+  set -- "$@" --protocol-channel "${proto}"
+fi
 
 if [ -n "${DVR_DIAG_FILE:-}" ]; then
   set -- "$@" --diag-file "${DVR_DIAG_FILE}"
 fi
 
+if [ -n "${DVR_METRICS_ADDR:-}" ]; then
+  set -- "$@" --metrics-addr "${DVR_METRICS_ADDR}"
+fi
+
 if [ "${DVR_VERBOSE:-0}" = "1" ]; then
   set -- "$@" --verbose
+fi
+
+if [ "${DVR_LOG_JSON:-0}" = "1" ]; then
+  set -- "$@" --log-json
 fi
 
 exec "$@"
