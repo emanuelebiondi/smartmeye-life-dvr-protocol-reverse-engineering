@@ -52,12 +52,52 @@ Recommendation:
 - use hub mode for multi-camera usage;
 - use direct mode only for targeted diagnostics or firmware compatibility checks.
 
+Operational note:
+- this DVR can leave the command session alive while the media socket silently stops producing packets;
+- `legacyhub` now detects that "media stalled, command alive" condition and forces a full DVR session reconnect instead of remaining in a zombie state.
+- current watchdog behavior: if no media bytes arrive for about `15s`, the hub tears down and recreates the DVR session.
+- ongoing media ACKs are now rate-limited inside the hub parser; older builds could block on synchronous ACK writes and degrade output to sparse frames during multi-camera/reopen scenarios.
+
 Channel count note:
 - the DVR protocol/device supports up to 8 channels;
 - in this deployment only channels 1..5 are enabled by default;
 - to enable more, update `DVR_HUB_CHANNELS` and uncomment `dvr_cam6..dvr_cam8` in `go2rtc.yaml`.
 - optional explicit mapping is available with `DVR_CHANNEL_MAP` (example: `1:0,2:1,3:2,4:3,5:4`).
 - when `DVR_CHANNEL_MAP` is set, it takes priority over `DVR_PROTOCOL_OFFSET`.
+
+## Known limitation: client mode auto-selection
+
+Some clients may auto-select `mse`/`fmp4` instead of pure `webrtc`, even when WebRTC is available.
+On this legacy DVR bridge, that can increase startup latency and make reopen behavior look unstable.
+
+How to avoid it:
+- in go2rtc UI tests, use a fixed mode URL, for example:
+  `http://<GO2RTC_IP>:1984/stream.html?src=dvr_cam1&mode=webrtc`
+- in Home Assistant (`custom:webrtc-camera`), force `mode: webrtc` in the card config.
+- keep active stream `#preload` disabled by default on fragile DVRs (enable only after stability validation).
+
+Home Assistant example:
+
+```yaml
+type: custom:webrtc-camera
+server: http://192.168.1.147:1984/
+streams:
+  - url: dvr_cam1
+    mode: webrtc
+```
+
+## Troubleshooting
+
+If streams stop loading or reopen indefinitely:
+- check `docker logs legacyhub-bridge`;
+- if keepalive commands continue but video stops, the DVR likely stalled only the media socket;
+- current bridge behavior is to detect that condition and reconnect the whole hub session automatically.
+
+Useful command:
+
+```bash
+docker logs legacyhub-bridge | grep -E 'media stalled|hub session ended|hub sync acquired'
+```
 
 ## Project structure
 
@@ -138,4 +178,14 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
   - Fixed: hub subscriber publish path now handles stale/reopened client sockets without blocking the channel, improving close/reopen stability.
   - Fixed: hub now actively removes disconnected subscriber sockets, preventing reopen lockups after repeated open/close cycles.
   - Fixed: subscriber cleanup now explicitly closes sockets on removal, reducing FD leaks and timeout buildup during repeated open/close tests.
+  - Fixed: cold-start latency from 0 consumers by improving keyframe detection (scan multiple NALs, not only first NAL).
+  - Fixed: hub bootstrap for new subscribers now keeps full keyframe payload (start + continuation packets), avoiding long waits for next IDR.
+  - Changed: active `dvr_cam1..5` go2rtc streams are now stability-first (no `#preload` by default); preload remains optional per channel.
+  - Fixed: intermittent loading/timeout after repeated open/close was traced to all-zero `frame_type=2` continuation payloads; these packets are now filtered out before forwarding/bootstrap.
   - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.
+  - Fixed: hub subscriber fan-out now uses a shorter per-subscriber write deadline, so one stalled socket does not block channel delivery for seconds.
+  - Fixed: `legacyhub` now detects silent media-socket stalls (`6002` stops while `6001` keepalive remains alive) and forces a full DVR session reconnect instead of staying in a zombie state.
+  - Fixed: synchronous per-packet media ACK writes on `6002` could stall the parser for about `3s` at a time under load/reopen churn, degrading output to sparse frames; ACKs are now rate-limited and written with a short deadline.
+  - Added: `DVR_SUB_RECONNECT` for fast local subscriber reconnect tuning (`go2rtc -> legacyhub`, default `500ms`), separate from DVR session reconnect.
+  - Changed: hub diagnostics now distinguish `wait_sync_cont` (expected at startup/re-sync) from real `drop_cont_without_start`, making reopen/debug analysis more reliable.
+  - Added: documented known client-mode limitation (auto `mse` fallback) and explicit WebRTC-only guidance for go2rtc UI and Home Assistant.

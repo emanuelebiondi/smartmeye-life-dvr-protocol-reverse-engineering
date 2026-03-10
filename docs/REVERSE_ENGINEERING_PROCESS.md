@@ -70,7 +70,12 @@ A notable finding was the presence of two command-id families (legacy and newer 
 Critical for stable streaming:
 - first media frame delivers `socket_id`;
 - client ACKs initial socket frame;
-- client continues ACKing media packets to keep DVR in sync.
+- ongoing media ACKs exist, but sending them synchronously for every packet proved unsafe in the hub implementation.
+
+Operational refinement:
+- under multi-camera hub load, synchronous per-packet ACK writes on `6002` could block for about `3s`;
+- that stalled the parser itself, so subscribers received only sparse frames even though DVR media packets were still arriving;
+- the bridge now rate-limits ongoing media ACKs and uses a short write deadline, while keeping the initial `socket_id` ACK.
 
 ## 4) Video decoding path: from gray screen to usable stream
 
@@ -87,6 +92,10 @@ Fixes that made stream stable:
 
 Result:
 - stable live H.264 stream consumable by go2rtc.
+
+Later operational finding:
+- under multi-camera hub usage, the DVR could keep the command/keepalive session alive while the media socket stopped delivering payloads entirely;
+- this produced a misleading "connected but frozen" state instead of a clean disconnect.
 
 ## 5) Software integration
 
@@ -107,6 +116,7 @@ Implemented pattern:
 - `main/sub/auto` profiles;
 - configurable protocol-channel mapping.
 - single-session hub + local subscribers as default for multi-camera stability.
+- client-mode limitation documented: some UI/HA paths can auto-select `mse` instead of `webrtc`; mitigation is explicit `mode=webrtc` in URLs/cards.
 
 ### 5.3 Docker operations
 
@@ -117,6 +127,7 @@ Operational additions:
 - diagnostics helper script.
 - guided `.env.example` with explicit mapping-priority notes (`DVR_CHANNEL_MAP` over `DVR_PROTOCOL_OFFSET`);
 - hub diagnostics wiring (`DVR_DIAG_FILE`) for frame/drop troubleshooting in single-session mode.
+- media-stall watchdog/reconnect handling in hub mode, so a dead media socket triggers full DVR session recovery.
 
 ## 6) Playback status
 
@@ -158,8 +169,9 @@ Practical checklist:
 3. replicate minimum login/bootstrap;
 4. validate media with real decoder output (`ffprobe`/`ffplay`);
 5. add ACK/state-machine logic for stream stability;
-6. expose a simple output interface first (`stdout`);
-7. productize afterwards (packaging, observability, docs).
+6. separately monitor command liveness and media liveness, because legacy devices may keep one socket alive while the other has already failed;
+7. expose a simple output interface first (`stdout`);
+8. productize afterwards (packaging, observability, docs).
 
 ## 10) Next steps
 
