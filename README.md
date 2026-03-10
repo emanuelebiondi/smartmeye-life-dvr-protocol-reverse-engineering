@@ -130,4 +130,5 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
   - Added: parser/config unit tests in `legacybridge/main_test.go`.
   - Changed: Docker stack now runs `legacyhub` + `go2rtc`.
   - Changed: active go2rtc profiles simplified to `dvr_cam1..5` (hub subscriber mode).
+  - Changed: `docker/.env.example` is now a guided, sectioned template with grouped settings and explicit mapping-priority notes (`DVR_CHANNEL_MAP` over `DVR_PROTOCOL_OFFSET`).
   - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.
