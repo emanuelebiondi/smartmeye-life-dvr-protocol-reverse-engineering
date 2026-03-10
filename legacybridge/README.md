@@ -148,3 +148,4 @@ See full context in:
   - Fixed: hub mode now opens `--diag-file` correctly (`DVR_DIAG_FILE` support in `legacyhub`).
   - Fixed: resolved a deadlock risk in hub subscriber publish/cleanup caused by nested locking during stale connection removal.
   - Fixed: hub publisher now removes disconnected/stale subscriber sockets and avoids reopen lockups after repeated open/close.
+  - Fixed: subscriber cleanup now closes sockets explicitly when removed, limiting timeout buildup after many open/close cycles.

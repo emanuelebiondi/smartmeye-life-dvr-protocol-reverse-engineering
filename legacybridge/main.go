@@ -583,6 +583,7 @@ func (p *hubPublisher) watchDisconnect(conn net.Conn) {
 }
 
 func (p *hubPublisher) removeConn(conn net.Conn, dropReason string) {
+	_ = conn.Close()
 	p.mu.Lock()
 	if _, ok := p.conns[conn]; !ok {
 		p.mu.Unlock()

@@ -137,4 +137,5 @@ If output remains `0` bytes, the DVR likely rejected the XML/cmd variant. In tha
   - Fixed: resolved a hub subscriber deadlock risk in publish/cleanup (nested lock path), which could freeze streams after close/reopen cycles.
   - Fixed: hub subscriber publish path now handles stale/reopened client sockets without blocking the channel, improving close/reopen stability.
   - Fixed: hub now actively removes disconnected subscriber sockets, preventing reopen lockups after repeated open/close cycles.
+  - Fixed: subscriber cleanup now explicitly closes sockets on removal, reducing FD leaks and timeout buildup during repeated open/close tests.
   - Fixed: multi-camera instability caused by opening too many direct DVR sessions in parallel.
